@@ -54,7 +54,7 @@ impl Matrix {
     /// Rotation by a multiple of 90 degrees, clockwise (matching the PDF `/Rotate` convention:
     /// "degrees by which the page shall be rotated clockwise when displayed").
     pub fn rotate_cw(deg: i32) -> Matrix {
-        match ((deg % 360) + 360) % 360 {
+        match deg.rem_euclid(360) {
             0 => Matrix::IDENTITY,
             // (x,y) -> (y, -x)
             90 => Matrix {
@@ -159,7 +159,7 @@ pub struct Placement {
 /// `/BBox = trim` (clip in page space). All rotation/scale/translation lives in the CTM, so
 /// the engine "owns" the geometry regardless of the PDF backend (SPEC §13).
 pub fn place_trim_in_cell(trim: Rect, rotate: i32, cell: Rect, scale: ScaleMode) -> Placement {
-    let rot = ((rotate % 360) + 360) % 360;
+    let rot = rotate.rem_euclid(360);
     let (w, h) = (trim.width(), trim.height());
     // Visible (post-rotation) dimensions.
     let (vw, vh) = if rot == 90 || rot == 270 {
@@ -171,6 +171,7 @@ pub fn place_trim_in_cell(trim: Rect, rotate: i32, cell: Rect, scale: ScaleMode)
     let s = match scale {
         ScaleMode::None => 1.0,
         ScaleMode::Fit => (cell.width() / vw).min(cell.height() / vh),
+        ScaleMode::Fixed(f) => f,
     };
 
     let placed_w = vw * s;
@@ -209,6 +210,78 @@ pub fn place_trim_in_cell(trim: Rect, rotate: i32, cell: Rect, scale: ScaleMode)
         bbox: trim,
         visible_w: placed_w,
         visible_h: placed_h,
+    }
+}
+
+/// Like [`place_trim_in_cell`] but adds duplex back-side flip and optional rotate-to-fit.
+/// `flip180` adds 180° (short-edge duplex back side); `rotate_to_fit` (only with `Fit`) tries the
+/// page at +90° too and keeps whichever fills the cell more.
+pub fn place_best(
+    trim: Rect,
+    page_rotate: i32,
+    cell: Rect,
+    scale: ScaleMode,
+    rotate_to_fit: bool,
+    flip180: bool,
+) -> Placement {
+    let base = page_rotate + if flip180 { 180 } else { 0 };
+    if rotate_to_fit && matches!(scale, ScaleMode::Fit) {
+        let a = place_trim_in_cell(trim, base, cell, scale);
+        let b = place_trim_in_cell(trim, base + 90, cell, scale);
+        if b.visible_w * b.visible_h > a.visible_w * a.visible_h {
+            return b;
+        }
+        return a;
+    }
+    place_trim_in_cell(trim, base, cell, scale)
+}
+
+/// Manual placement: anchor the trim box's lower-left at `(x, y)` in sheet space, apply an
+/// explicit `factor`, clockwise `rotate`, and optional horizontal `mirror`.
+pub fn place_manual(
+    trim: Rect,
+    x: f64,
+    y: f64,
+    factor: f64,
+    rotate: i32,
+    mirror: bool,
+) -> Placement {
+    let (w, h) = (trim.width(), trim.height());
+    let to_origin = Matrix::translate(-trim.llx, -trim.lly);
+    let r = Matrix::rotate_cw(rotate);
+    let m = if mirror {
+        Matrix::scale(-1.0, 1.0)
+    } else {
+        Matrix::IDENTITY
+    };
+    let rm = m.compose(&r); // rotate first, then mirror
+    let corners = [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)];
+    let (mut minx, mut miny, mut maxx, mut maxy) = (
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    );
+    for (px, py) in corners {
+        let (rx, ry) = rm.apply(px, py);
+        minx = minx.min(rx);
+        miny = miny.min(ry);
+        maxx = maxx.max(rx);
+        maxy = maxy.max(ry);
+    }
+    let shift = Matrix::translate(-minx, -miny);
+    let scale_m = Matrix::scale(factor, factor);
+    let to_xy = Matrix::translate(x, y);
+    let ctm = to_xy
+        .compose(&scale_m)
+        .compose(&shift)
+        .compose(&rm)
+        .compose(&to_origin);
+    Placement {
+        ctm,
+        bbox: trim,
+        visible_w: (maxx - minx) * factor,
+        visible_h: (maxy - miny) * factor,
     }
 }
 

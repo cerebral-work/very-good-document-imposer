@@ -88,7 +88,7 @@ fn read_page_geometry(page: &QPdfDictionary) -> Option<PageGeometry> {
             art: read_box(page, "/ArtBox"),
             bleed: read_box(page, "/BleedBox"),
         },
-        rotate: ((rotate % 360) + 360) % 360,
+        rotate: rotate.rem_euclid(360),
     })
 }
 
@@ -137,66 +137,68 @@ pub fn render(job: &JobSpec, plan: &ImpositionPlan, sources: &[LoadedSource]) ->
     let dst = QPdf::empty();
 
     for sheet in &plan.sheets {
-        let xobjects = dst.new_dictionary();
-        let mut ops = String::new();
+        for surface in &sheet.surfaces {
+            let xobjects = dst.new_dictionary();
+            let mut ops = String::new();
 
-        for (i, cell) in sheet.cells.iter().enumerate() {
-            let src = sources
-                .iter()
-                .find(|s| s.id == cell.source_id)
-                .ok_or_else(|| EngineError::UnknownSource(cell.source_id.clone()))?;
-            let page = src.doc.get_page(cell.source_page as u32).ok_or_else(|| {
-                EngineError::Backend(format!("page {} vanished", cell.source_page))
-            })?;
+            for (i, cell) in surface.cells.iter().enumerate() {
+                let src = sources
+                    .iter()
+                    .find(|s| s.id == cell.source_id)
+                    .ok_or_else(|| EngineError::UnknownSource(cell.source_id.clone()))?;
+                let page = src.doc.get_page(cell.source_page as u32).ok_or_else(|| {
+                    EngineError::Backend(format!("page {} vanished", cell.source_page))
+                })?;
 
-            // Page content (decoded, concatenated) becomes the form's content stream.
-            let content = page.get_page_content_data().map_err(backend)?;
-            let form = dst.new_stream(content.as_ref());
-            let fd = form.get_dictionary();
-            fd.set("/Type", dst.new_name("/XObject"));
-            fd.set("/Subtype", dst.new_name("/Form"));
-            fd.set("/FormType", dst.new_integer(1));
-            fd.set("/BBox", rect_object(&dst, &cell.bbox)?);
-            fd.set(
-                "/Matrix",
-                dst.parse_object("[ 1 0 0 1 0 0 ]").map_err(backend)?,
-            );
-            // Copy the page's resources verbatim into the destination (preserves CMYK/spot/ICC).
-            // `copy_from_foreign` requires an INDIRECT object; promote direct resources first.
-            match get_inherited(&page, "/Resources") {
-                Some(res) => {
-                    let res = if res.is_indirect() {
-                        res
-                    } else {
-                        res.into_indirect()
-                    };
-                    fd.set("/Resources", dst.copy_from_foreign(&res));
+                // Page content (decoded, concatenated) becomes the form's content stream.
+                let content = page.get_page_content_data().map_err(backend)?;
+                let form = dst.new_stream(content.as_ref());
+                let fd = form.get_dictionary();
+                fd.set("/Type", dst.new_name("/XObject"));
+                fd.set("/Subtype", dst.new_name("/Form"));
+                fd.set("/FormType", dst.new_integer(1));
+                fd.set("/BBox", rect_object(&dst, &cell.bbox)?);
+                fd.set(
+                    "/Matrix",
+                    dst.parse_object("[ 1 0 0 1 0 0 ]").map_err(backend)?,
+                );
+                // Copy the page's resources verbatim into the destination (preserves CMYK/spot/ICC).
+                // `copy_from_foreign` requires an INDIRECT object; promote direct resources first.
+                match get_inherited(&page, "/Resources") {
+                    Some(res) => {
+                        let res = if res.is_indirect() {
+                            res
+                        } else {
+                            res.into_indirect()
+                        };
+                        fd.set("/Resources", dst.copy_from_foreign(&res));
+                    }
+                    None => {
+                        fd.set("/Resources", dst.new_dictionary());
+                    }
                 }
-                None => {
-                    fd.set("/Resources", dst.new_dictionary());
-                }
+                // Isolated wrapper group with the resolved blend space (engine-synthesized).
+                fd.set("/Group", group_object(&dst, cell.group_cs)?);
+
+                let name = format!("/X{i}");
+                xobjects.set(&name, &form);
+                ops.push_str(&format!("q {} cm {} Do Q\n", cell.ctm.to_pdf(), name));
             }
-            // Isolated wrapper group with the resolved blend space (engine-synthesized).
-            fd.set("/Group", group_object(&dst, cell.group_cs)?);
 
-            let name = format!("/X{i}");
-            xobjects.set(&name, &form);
-            ops.push_str(&format!("q {} cm {} Do Q\n", cell.ctm.to_pdf(), name));
+            let content_stream = dst.new_stream(ops.as_bytes());
+            let resources = dst.new_dictionary();
+            resources.set("/XObject", &xobjects);
+
+            let page = dst.new_dictionary();
+            page.set("/Type", dst.new_name("/Page"));
+            page.set(
+                "/MediaBox",
+                rect_object(&dst, &Rect::new(0.0, 0.0, sheet.width, sheet.height))?,
+            );
+            page.set("/Resources", &resources);
+            page.set("/Contents", &content_stream);
+            dst.add_page(&page, false).map_err(backend)?;
         }
-
-        let content_stream = dst.new_stream(ops.as_bytes());
-        let resources = dst.new_dictionary();
-        resources.set("/XObject", &xobjects);
-
-        let page = dst.new_dictionary();
-        page.set("/Type", dst.new_name("/Page"));
-        page.set(
-            "/MediaBox",
-            rect_object(&dst, &Rect::new(0.0, 0.0, sheet.width, sheet.height))?,
-        );
-        page.set("/Resources", &resources);
-        page.set("/Contents", &content_stream);
-        dst.add_page(&page, false).map_err(backend)?;
     }
 
     let mut w = dst.writer();

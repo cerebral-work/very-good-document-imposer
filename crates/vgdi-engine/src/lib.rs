@@ -1,20 +1,23 @@
 //! Very Good Document Imposer — headless imposition engine.
 //!
 //! Pipeline: parse `JobSpec` -> read source page geometry -> [`plan`] -> emit imposed PDF.
-//! The planner and geometry kernel are pure and PDF-backend-independent; the actual PDF read/
-//! write lives behind the `qpdf-backend` feature so the core compiles and unit-tests without
-//! the vendored C++ build (SPEC §5).
+//! The planner, geometry kernel, ordering, and mark geometry are pure and PDF-backend-independent;
+//! the actual PDF read/write lives behind the `qpdf-backend` feature (SPEC §5).
 
 pub mod boxes;
 pub mod error;
 pub mod geom;
+pub mod imposition;
+pub mod marks;
 pub mod plan;
 
 #[cfg(feature = "qpdf-backend")]
 pub mod qpdf_backend;
 
 pub use error::{EngineError, Result};
-pub use plan::{plan, Cell, GroupCs, ImpositionPlan, PageGeometry, PlannedSheet, SourceInfo};
+pub use plan::{
+    plan, Cell, GroupCs, ImpositionPlan, PageGeometry, PlannedSheet, SourceInfo, Surface,
+};
 
 /// Read sources referenced by `job`, plan, and write the imposed PDF bytes to `out`.
 /// (qpdf backend only.)

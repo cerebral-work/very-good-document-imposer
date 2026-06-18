@@ -8,8 +8,8 @@
 use qpdf::{ObjectStreamMode, QPdf};
 use std::path::{Path, PathBuf};
 use vgdi_types::{
-    ColorPolicy, FillOrder, JobSpec, NUp, OutputTarget, ScaleMode, Scheme, Sheet, SourceRef,
-    WorkStyle, SCHEMA_ID,
+    BleedMode, ColorPolicy, Duplex, FillOrder, JobSpec, MarkSet, NUp, OutputTarget, SaddleStitch,
+    ScaleMode, Scheme, Sheet, SourceRef, StepRepeat, WorkStyle, SCHEMA_ID,
 };
 
 fn tmp(name: &str) -> PathBuf {
@@ -37,28 +37,38 @@ fn write_source(path: &Path, pages: usize, with_trim: bool) {
     std::fs::write(path, w.write_to_memory().unwrap()).unwrap();
 }
 
-fn nup_job(src_path: &Path, rows: u32, cols: u32) -> JobSpec {
+fn job_with(src_path: &Path, scheme: Scheme) -> JobSpec {
     JobSpec {
         schema: SCHEMA_ID.to_string(),
         sources: vec![SourceRef {
             id: "body".into(),
             path: src_path.to_path_buf(),
         }],
-        scheme: Scheme::NUp(NUp {
+        scheme,
+        sheet: Sheet {
+            size_pt: [800.0, 800.0],
+            gripper_pt: 0.0,
+            work_style: WorkStyle::Sheetwise,
+            flip: None,
+        },
+        marks: MarkSet::default(),
+        color_policy: ColorPolicy::default(),
+        output: OutputTarget::default(),
+    }
+}
+
+fn nup_job(src_path: &Path, rows: u32, cols: u32) -> JobSpec {
+    job_with(
+        src_path,
+        Scheme::NUp(NUp {
             rows,
             cols,
             fill: FillOrder::RowMajor,
             scale: ScaleMode::Fit,
             gutter_pt: 0.0,
+            rotate_to_fit: false,
         }),
-        sheet: Sheet {
-            size_pt: [800.0, 800.0],
-            gripper_pt: 0.0,
-            work_style: WorkStyle::Sheetwise,
-        },
-        color_policy: ColorPolicy::default(),
-        output: OutputTarget::default(),
-    }
+    )
 }
 
 #[test]
@@ -102,4 +112,71 @@ fn source_without_trim_or_art_is_rejected() {
         matches!(err, vgdi_engine::EngineError::NoTrimOrArt { .. }),
         "expected NoTrimOrArt, got {err:?}"
     );
+}
+
+#[test]
+fn saddle_stitch_renders_one_page_per_surface() {
+    let src = tmp("saddle8.pdf");
+    write_source(&src, 8, true);
+    let job = job_with(
+        &src,
+        Scheme::SaddleStitch(SaddleStitch {
+            duplex: Duplex::LongEdge,
+            cover: false,
+            scale: ScaleMode::Fit,
+            spine_pt: 0.0,
+        }),
+    );
+    let out = tmp("saddle8_out.pdf");
+    vgdi_engine::impose_to_file(&job, &out).unwrap();
+    let doc = QPdf::read(&out).unwrap();
+    // 8 pages -> 2 sheets -> 4 surfaces -> 4 imposed PDF pages, each a 2-up spread.
+    assert_eq!(doc.get_num_pages().unwrap(), 4);
+}
+
+#[test]
+fn step_repeat_renders_tiled_sheet() {
+    let src = tmp("sr.pdf");
+    write_source(&src, 1, true);
+    let job = job_with(
+        &src,
+        Scheme::StepRepeat(StepRepeat {
+            rows: 2,
+            cols: 3,
+            h_space_pt: 10.0,
+            v_space_pt: 10.0,
+            bleed_mode: BleedMode::NoBleed,
+            scale: ScaleMode::Fit,
+        }),
+    );
+    let out = tmp("sr_out.pdf");
+    vgdi_engine::impose_to_file(&job, &out).unwrap();
+    let doc = QPdf::read(&out).unwrap();
+    assert_eq!(
+        doc.get_num_pages().unwrap(),
+        1,
+        "one tiled sheet for one source page"
+    );
+}
+
+// ---- Deferred emission specs (written now; un-ignore as M1 emission lands) ----
+
+#[test]
+#[ignore = "M1 pending: emit marks into the sheet content stream"]
+fn marks_emitted_use_separation_all_colorant() {
+    // When crop/registration marks are enabled, the output sheet must declare a Separation
+    // colour space named `All` and stroke the marks in it (never rich black).
+    unimplemented!("marks emission not wired into qpdf_backend yet");
+}
+
+#[test]
+#[ignore = "M1 pending: bleed-pull renders content out to the bleed band"]
+fn bleed_pull_extends_visible_content_to_bleed() {
+    unimplemented!("bleed-pull clip rendering not wired yet");
+}
+
+#[test]
+#[ignore = "M1 pending: slug text + barcode emission"]
+fn slug_fields_render_text_in_slug_area() {
+    unimplemented!("slug text emission not wired yet");
 }
