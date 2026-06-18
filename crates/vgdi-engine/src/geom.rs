@@ -142,6 +142,22 @@ pub fn fmt(v: f64) -> String {
     s
 }
 
+/// Axis-aligned bounds of the rectangle `[0,w] x [0,h]` after applying matrix `m`.
+fn corners_bounds(w: f64, h: f64, m: &Matrix) -> (f64, f64, f64, f64) {
+    let mut minx = f64::INFINITY;
+    let mut miny = f64::INFINITY;
+    let mut maxx = f64::NEG_INFINITY;
+    let mut maxy = f64::NEG_INFINITY;
+    for (x, y) in [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)] {
+        let (rx, ry) = m.apply(x, y);
+        minx = minx.min(rx);
+        miny = miny.min(ry);
+        maxx = maxx.max(rx);
+        maxy = maxy.max(ry);
+    }
+    (minx, miny, maxx, maxy)
+}
+
 /// The result of normalizing a placement: the CTM to paint the source page's content with,
 /// the form `/BBox` (the source trim box, clipping in form space), and the visible size.
 #[derive(Clone, Copy, Debug)]
@@ -187,14 +203,8 @@ pub fn place_trim_in_cell(trim: Rect, rotate: i32, cell: Rect, scale: ScaleMode)
     //  - translate to the cell anchor
     let to_origin = Matrix::translate(-trim.llx, -trim.lly);
     let r = Matrix::rotate_cw(rot);
-    // Corners of [0,w]x[0,h] after rotation, to find the min corner to shift back.
-    let corners = [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)];
-    let (mut minx, mut miny) = (f64::INFINITY, f64::INFINITY);
-    for (x, y) in corners {
-        let (rx, ry) = r.apply(x, y);
-        minx = minx.min(rx);
-        miny = miny.min(ry);
-    }
+    // Shift the rotated box back into the positive quadrant.
+    let (minx, miny, _, _) = corners_bounds(w, h, &r);
     let shift = Matrix::translate(-minx, -miny);
     let scale_m = Matrix::scale(s, s);
     let to_cell = Matrix::translate(ox, oy);
@@ -255,20 +265,7 @@ pub fn place_manual(
         Matrix::IDENTITY
     };
     let rm = m.compose(&r); // rotate first, then mirror
-    let corners = [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)];
-    let (mut minx, mut miny, mut maxx, mut maxy) = (
-        f64::INFINITY,
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-        f64::NEG_INFINITY,
-    );
-    for (px, py) in corners {
-        let (rx, ry) = rm.apply(px, py);
-        minx = minx.min(rx);
-        miny = miny.min(ry);
-        maxx = maxx.max(rx);
-        maxy = maxy.max(ry);
-    }
+    let (minx, miny, maxx, maxy) = corners_bounds(w, h, &rm);
     let shift = Matrix::translate(-minx, -miny);
     let scale_m = Matrix::scale(factor, factor);
     let to_xy = Matrix::translate(x, y);

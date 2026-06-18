@@ -14,7 +14,8 @@ use crate::error::{EngineError, Result};
 use crate::geom::fmt;
 use crate::plan::{plan, GroupCs, ImpositionPlan, PageGeometry, SourceInfo};
 use qpdf::{
-    ObjectStreamMode, QPdf, QPdfDictionary, QPdfObject, QPdfObjectLike, QPdfObjectType, QPdfScalar,
+    ObjectStreamMode, QPdf, QPdfArray, QPdfDictionary, QPdfObject, QPdfObjectLike, QPdfObjectType,
+    QPdfScalar, QPdfStream,
 };
 use std::path::Path;
 use vgdi_types::{JobSpec, Rect};
@@ -89,7 +90,46 @@ fn read_page_geometry(page: &QPdfDictionary) -> Option<PageGeometry> {
             bleed: read_box(page, "/BleedBox"),
         },
         rotate: rotate.rem_euclid(360),
+        group_cs: detect_group_cs(page),
     })
+}
+
+/// Detect the blend color space the source page declares via its `/Group /CS`, so the engine's
+/// isolated wrapper group uses a matching space instead of forcing DeviceCMYK (SPEC §8 #4). Falls
+/// back to DeviceCMYK when the page declares no group space (the prepress device default).
+/// NB: ICC profiles are mapped to a device family by component count — preserving the exact ICC
+/// profile on the wrapper is deferred prepress work.
+fn detect_group_cs(page: &QPdfDictionary) -> GroupCs {
+    let Some(group) = page.get("/Group") else {
+        return GroupCs::DeviceCmyk;
+    };
+    if group.get_type() != QPdfObjectType::Dictionary {
+        return GroupCs::DeviceCmyk;
+    }
+    let Some(cs) = QPdfDictionary::from(group).get("/CS") else {
+        return GroupCs::DeviceCmyk;
+    };
+    match cs.get_type() {
+        QPdfObjectType::Name => match cs.as_name().trim_start_matches('/') {
+            "DeviceRGB" | "CalRGB" | "RGB" => GroupCs::DeviceRgb,
+            "DeviceGray" | "CalGray" | "G" => GroupCs::DeviceGray,
+            _ => GroupCs::DeviceCmyk,
+        },
+        QPdfObjectType::Array => {
+            // ICCBased: [ /ICCBased <stream> ]; the stream's /N is the component count.
+            let n = QPdfArray::from(cs)
+                .get(1)
+                .filter(|o| o.get_type() == QPdfObjectType::Stream)
+                .and_then(|o| QPdfStream::from(o).get_dictionary().get("/N"))
+                .map(|o| QPdfScalar::from(o).as_i32());
+            match n {
+                Some(1) => GroupCs::DeviceGray,
+                Some(3) => GroupCs::DeviceRgb,
+                _ => GroupCs::DeviceCmyk,
+            }
+        }
+        _ => GroupCs::DeviceCmyk,
+    }
 }
 
 /// Read a source PDF and gather its per-page geometry.
@@ -135,6 +175,11 @@ fn rect_object(dst: &QPdf, r: &Rect) -> Result<QPdfObject> {
 /// Render a plan to PDF bytes using the loaded sources.
 pub fn render(job: &JobSpec, plan: &ImpositionPlan, sources: &[LoadedSource]) -> Result<Vec<u8>> {
     let dst = QPdf::empty();
+    // The form `/Matrix` is identity for every placed cell — parse once, share by reference.
+    let identity_matrix = dst
+        .parse_object("[ 1 0 0 1 0 0 ]")
+        .map_err(backend)?
+        .into_indirect();
 
     for sheet in &plan.sheets {
         for surface in &sheet.surfaces {
@@ -158,10 +203,7 @@ pub fn render(job: &JobSpec, plan: &ImpositionPlan, sources: &[LoadedSource]) ->
                 fd.set("/Subtype", dst.new_name("/Form"));
                 fd.set("/FormType", dst.new_integer(1));
                 fd.set("/BBox", rect_object(&dst, &cell.bbox)?);
-                fd.set(
-                    "/Matrix",
-                    dst.parse_object("[ 1 0 0 1 0 0 ]").map_err(backend)?,
-                );
+                fd.set("/Matrix", &identity_matrix);
                 // Copy the page's resources verbatim into the destination (preserves CMYK/spot/ICC).
                 // `copy_from_foreign` requires an INDIRECT object; promote direct resources first.
                 match get_inherited(&page, "/Resources") {

@@ -17,8 +17,10 @@ use vgdi_types::{
 #[derive(Clone, Copy, Debug)]
 pub struct PageGeometry {
     pub boxes: PageBoxes,
-    /// PDF `/Rotate`, normalized to 0/90/180/270 by the reader.
+    /// PDF `/Rotate` (validated to a multiple of 90 by the planner).
     pub rotate: i32,
+    /// Blend color space the source page declares (else DeviceCMYK), for the isolated wrapper.
+    pub group_cs: GroupCs,
 }
 
 /// All pages of one input source.
@@ -121,8 +123,8 @@ fn primary(sources: &[SourceInfo]) -> Result<&SourceInfo> {
     sources.first().ok_or(EngineError::NoSources)
 }
 
-/// Validate a source page and return its (trim, effective-bleed, rotate).
-fn validate_page(src: &SourceInfo, page: usize) -> Result<(Rect, Rect, i32)> {
+/// Validate a source page and return its (trim, effective-bleed, rotate, group-cs).
+fn validate_page(src: &SourceInfo, page: usize) -> Result<(Rect, Rect, i32, GroupCs)> {
     let geom = src
         .pages
         .get(page)
@@ -140,8 +142,15 @@ fn validate_page(src: &SourceInfo, page: usize) -> Result<(Rect, Rect, i32)> {
             page,
         });
     }
+    if geom.rotate % 90 != 0 {
+        return Err(EngineError::InvalidRotate {
+            id: src.id.clone(),
+            page,
+            rotate: geom.rotate,
+        });
+    }
     let bleed = geom.boxes.effective_bleed().unwrap_or(trim);
-    Ok((trim, bleed, geom.rotate))
+    Ok((trim, bleed, geom.rotate, geom.group_cs))
 }
 
 /// Rectangle for grid cell (row, col); row 0 at top, gripper reserved at the bottom edge.
@@ -180,13 +189,13 @@ fn slot_to_rowcol(slot: usize, rows: u32, cols: u32, fill: FillOrder) -> (u32, u
     }
 }
 
-fn cmyk_cell(src_id: &str, page: usize, ctm: Matrix, bbox: Rect) -> Cell {
+fn make_cell(src_id: &str, page: usize, ctm: Matrix, bbox: Rect, group_cs: GroupCs) -> Cell {
     Cell {
         source_id: src_id.to_string(),
         source_page: page,
         ctm,
         bbox,
-        group_cs: GroupCs::DeviceCmyk,
+        group_cs,
     }
 }
 
@@ -209,7 +218,7 @@ fn plan_nup(job: &JobSpec, sources: &[SourceInfo], n: &NUp) -> Result<Imposition
     let mut sheets = Vec::new();
     let mut cells = Vec::new();
     for page in 0..src.pages.len() {
-        let (trim, _bleed, rot) = validate_page(src, page)?;
+        let (trim, _bleed, rot, cs) = validate_page(src, page)?;
         let slot = cells.len();
         let (r, c) = slot_to_rowcol(slot, n.rows, n.cols, n.fill);
         let cell = grid_cell_rect(
@@ -224,7 +233,7 @@ fn plan_nup(job: &JobSpec, sources: &[SourceInfo], n: &NUp) -> Result<Imposition
             c,
         )?;
         let p = place_best(trim, rot, cell, n.scale, n.rotate_to_fit, false);
-        cells.push(cmyk_cell(&src.id, page, p.ctm, p.bbox));
+        cells.push(make_cell(&src.id, page, p.ctm, p.bbox, cs));
         if cells.len() == per_sheet {
             sheets.push(one_surface_sheet(sw, sh, std::mem::take(&mut cells)));
         }
@@ -268,7 +277,7 @@ fn plan_step_repeat(
     // One sheet per source page, fully tiled with that page (gang one design per sheet).
     let mut sheets = Vec::new();
     for page in 0..src.pages.len() {
-        let (trim, bleed, rot) = validate_page(src, page)?;
+        let (trim, bleed, rot, cs) = validate_page(src, page)?;
         let clip = match sr.bleed_mode {
             BleedMode::Bleed => bleed,
             BleedMode::NoBleed => trim,
@@ -288,7 +297,7 @@ fn plan_step_repeat(
                     c,
                 )?;
                 let p = place_best(trim, rot, cell, sr.scale, false, false);
-                cells.push(cmyk_cell(&src.id, page, p.ctm, clip));
+                cells.push(make_cell(&src.id, page, p.ctm, clip, cs));
             }
         }
         sheets.push(one_surface_sheet(sw, sh, cells));
@@ -333,7 +342,7 @@ fn plan_booklet(
                 continue; // blank pad
             }
             let page = pnum - 1;
-            let (trim, _bleed, rot) = validate_page(src, page)?;
+            let (trim, _bleed, rot, cs) = validate_page(src, page)?;
             let cell = grid_cell_rect(
                 sw,
                 sh,
@@ -346,7 +355,7 @@ fn plan_booklet(
                 col as u32,
             )?;
             let p = place_best(trim, rot, cell, scale, false, flip);
-            cells.push(cmyk_cell(&src.id, page, p.ctm, p.bbox));
+            cells.push(make_cell(&src.id, page, p.ctm, p.bbox, cs));
         }
         surfaces.push(Surface { side: *side, cells });
     }
@@ -378,9 +387,16 @@ fn plan_manual(job: &JobSpec, sources: &[SourceInfo], m: &Manual) -> Result<Impo
                     .ok_or_else(|| EngineError::UnknownSource(id.clone()))?,
                 None => primary(sources)?,
             };
-            let (trim, _bleed, rot) = validate_page(src, pl.page)?;
+            let (trim, _bleed, rot, cs) = validate_page(src, pl.page)?;
+            if pl.rotate % 90 != 0 {
+                return Err(EngineError::InvalidRotate {
+                    id: src.id.clone(),
+                    page: pl.page,
+                    rotate: pl.rotate,
+                });
+            }
             let p = place_manual(trim, pl.x_pt, pl.y_pt, pl.scale, pl.rotate + rot, pl.mirror);
-            cells.push(cmyk_cell(&src.id, pl.page, p.ctm, p.bbox));
+            cells.push(make_cell(&src.id, pl.page, p.ctm, p.bbox, cs));
         }
         surfaces.push(Surface {
             side: ms.side,
@@ -414,6 +430,7 @@ mod tests {
                 bleed: Some(Rect::new(5.0, 5.0, 195.0, 195.0)),
             },
             rotate,
+            group_cs: GroupCs::DeviceCmyk,
         }
     }
 
@@ -595,5 +612,36 @@ mod tests {
         let p = plan(&job(m), &src(1)).unwrap();
         assert_eq!(p.sheets.len(), 1);
         assert_eq!(p.cell_count(), 2);
+    }
+
+    #[test]
+    fn invalid_rotate_is_rejected_not_panicked() {
+        // A parseable-but-malformed /Rotate (not a multiple of 90) must be a clean error,
+        // never a panic in rotate_cw.
+        let pages = vec![geom(Some(Rect::new(10.0, 10.0, 190.0, 190.0)), 45)];
+        let sources = vec![SourceInfo {
+            id: "body".into(),
+            pages,
+        }];
+        assert!(matches!(
+            plan(&job(nup(1, 1)), &sources).unwrap_err(),
+            EngineError::InvalidRotate { rotate: 45, .. }
+        ));
+    }
+
+    #[test]
+    fn cell_carries_declared_group_cs() {
+        // A page that declares an RGB blend space must keep it (not be forced to CMYK).
+        let mut g = geom(Some(Rect::new(10.0, 10.0, 190.0, 190.0)), 0);
+        g.group_cs = GroupCs::DeviceRgb;
+        let sources = vec![SourceInfo {
+            id: "body".into(),
+            pages: vec![g],
+        }];
+        let p = plan(&job(nup(1, 1)), &sources).unwrap();
+        assert_eq!(
+            p.sheets[0].surfaces[0].cells[0].group_cs,
+            GroupCs::DeviceRgb
+        );
     }
 }

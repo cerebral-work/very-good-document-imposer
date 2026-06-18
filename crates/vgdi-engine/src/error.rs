@@ -34,6 +34,13 @@ pub enum EngineError {
     )]
     ContainmentViolation { id: String, page: usize },
 
+    #[error("page {page} of source `{id}`: /Rotate {rotate} is not a multiple of 90")]
+    InvalidRotate {
+        id: String,
+        page: usize,
+        rotate: i32,
+    },
+
     // --- Backend / IO ---
     #[error("backend: {0}")]
     Backend(String),
