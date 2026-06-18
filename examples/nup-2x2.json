@@ -1,0 +1,27 @@
+{
+  "schema": "vgdi/jobspec@1",
+  "sources": [
+    { "id": "body", "path": "tests/fixtures/cmyk-trim.pdf" }
+  ],
+  "scheme": {
+    "kind": "n-up",
+    "rows": 2,
+    "cols": 2,
+    "fill": "row-major",
+    "scale": "fit",
+    "gutter_pt": 0.0
+  },
+  "sheet": {
+    "size_pt": [1190.55, 841.89],
+    "gripper_pt": 28.35,
+    "work_style": "sheetwise"
+  },
+  "color_policy": {
+    "preserve_spots": true,
+    "preserve_overprint": true
+  },
+  "output": {
+    "pdfx": null,
+    "pdf_version": "1.6"
+  }
+}

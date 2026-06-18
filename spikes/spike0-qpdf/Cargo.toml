@@ -1,0 +1,16 @@
+[package]
+name = "spike0-qpdf"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+description = "Spike-0: prove vendored qpdf static-link + page→form-XObject placement + deterministic output on macOS/Windows/Linux. Throwaway CI feasibility gate (ADR-0001 follow-ups)."
+
+[[bin]]
+name = "spike0-qpdf"
+path = "src/main.rs"
+
+[dependencies]
+qpdf = { workspace = true }

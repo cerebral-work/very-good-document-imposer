@@ -1,0 +1,19 @@
+[package]
+name = "vgdi-cli"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "`impose` CLI — the automation contract over the imposition engine."
+
+[[bin]]
+name = "impose"
+path = "src/main.rs"
+
+[dependencies]
+vgdi-engine = { workspace = true, features = ["qpdf-backend"] }
+vgdi-types = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }

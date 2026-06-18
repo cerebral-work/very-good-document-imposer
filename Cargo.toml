@@ -1,0 +1,32 @@
+# Very Good Document Imposer — Cargo workspace.
+# Engine/CLI-first; GUI deferred. See SPEC.md and docs/adr/0001-platform-and-stack.md.
+[workspace]
+resolver = "2"
+members = [
+    "crates/vgdi-types",
+    "crates/vgdi-engine",
+    "crates/vgdi-cli",
+    "spikes/spike0-qpdf",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.96"
+license = "0BSD"
+authors = ["Ruby Morgan Voigt", "Cerebral Work Institute"]
+
+[workspace.dependencies]
+vgdi-types = { path = "crates/vgdi-types" }
+vgdi-engine = { path = "crates/vgdi-engine" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+# qpdf: Apache-2.0. `vendored` cc-compiles qpdf + bundled zlib/jpeg with NATIVE crypto
+# (no GnuTLS/OpenSSL → no LGPL in the graph). Pin to 0.3.5; see ADR-0001 binding note —
+# the page→form-XObject helper is C++-only, so placement is assembled on the C-API object model.
+qpdf = { version = "0.3.5", features = ["vendored"] }
+
+[profile.release]
+lto = "thin"

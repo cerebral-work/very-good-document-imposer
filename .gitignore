@@ -1,0 +1,27 @@
+# Rust
+/target/
+**/target/
+Cargo.lock.bak
+
+# qpdf / native build artifacts (vendored build outputs)
+/vendor/**/build/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.pdb
+
+# Test scratch / generated PDFs
+/tests/_out/
+/tests/_scratch/
+*.tmp.pdf
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
