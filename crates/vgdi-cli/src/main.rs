@@ -1,18 +1,28 @@
 //! `impose` — read a JobSpec (JSON or TOML), run the engine, write the imposed PDF.
 //!
-//! ∑CG: user-facing CLI help/`about` prose and message wording are intentionally NOT authored
-//! here (per the no-copywriting rule). Arg names are technical identifiers; the `about` strings
-//! are left empty for the product owner to fill in. Grep `∑CG` for every copy gap.
+//! User-facing CLI help/`about`/message wording is intentionally NOT authored here (no-copywriting
+//! rule). Each gap is marked `∑CG` with a commented-out spec + sample to seed the final wording;
+//! arg names are technical identifiers. Grep `∑CG` for every copy gap.
 
 use clap::Parser;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+// ∑CG: command description shown in `impose --help`
+//   spec: one line, ≤ ~60 chars, states what the tool does
+//   sample: "Impose PDF pages onto press sheets."
+// (Deliberately NOT a `///` doc comment on the struct — that would render as the about text.)
 #[derive(Parser)]
 #[command(name = "impose")]
 struct Cli {
-    /// ∑CG: help text omitted
+    // ∑CG: positional-arg help for the input JobSpec path
+    //   spec: short noun phrase, ≤ ~50 chars
+    //   sample: "Path to the JobSpec file (.json or .toml)"
+    // (`//` not `///`, so clap shows no help — avoids leaking the token to users.)
     job: PathBuf,
+    // ∑CG: help for the --output flag
+    //   spec: short phrase, ≤ ~50 chars
+    //   sample: "Path to write the imposed PDF"
     #[arg(short, long)]
     output: PathBuf,
 }
