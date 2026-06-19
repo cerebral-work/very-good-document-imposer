@@ -5,8 +5,8 @@
     "kind": "step-repeat",
     "max_rows": 0,
     "max_cols": 0,
-    "h_space_pt": 0.1,
-    "v_space_pt": 0.1,
+    "h_space_pt": 7.2,
+    "v_space_pt": 7.2,
     "bleed_mode": "bleed",
     "scale": "none"
   },
