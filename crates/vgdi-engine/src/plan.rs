@@ -446,29 +446,58 @@ fn fit_count(usable: f64, card: f64, step: f64, max: u32) -> usize {
     }
 }
 
-/// Per-edge inner-bleed creep: how far to pull a neighbour-facing bleed edge in from full bleed,
-/// given the available per-side `bleed` (sheet space). Clamped to `0..=bleed` — never adds bleed,
-/// never crops past the trim. With no bleed (`NoBleed` tiling) it is always 0.
-fn creep_per_edge(spec: InnerBleed, bleed: f64) -> f64 {
-    let raw = match spec {
-        InnerBleed::Full => 0.0,
-        InnerBleed::Fraction(f) => bleed * (1.0 - f.clamp(0.0, 1.0)),
-        InnerBleed::CombinedPt(total) => bleed - total.max(0.0) / 2.0,
+/// Inner-bleed creep for one axis, given the two opposing per-side bleeds (`b_lo` on the
+/// low-coordinate edge, `b_hi` on the high-coordinate edge, both sheet space). Returns how far to
+/// pull **each** neighbour-facing edge in from full bleed: `(creep_lo, creep_hi)`.
+///
+/// The seam where two cards' clipped bleeds meet must sit on the cut line, which is centred between
+/// the two trims — so each card keeps the **same** retained bleed (`band/2`) on either side of a
+/// boundary, regardless of how the trim sits within the bleed box. With a symmetric bleed this is the
+/// plain `bleed·(1−f)` creep on both edges; with an off-centre trim (asymmetric bleed) the wider edge
+/// is cropped more so the seam still lands on the knife. `retained` is capped to the smaller available
+/// bleed so neither edge crops past its own bleed, and non-finite parameters fall back to `Full`.
+fn inner_creeps(spec: InnerBleed, b_lo: f64, b_hi: f64) -> (f64, f64) {
+    let full = b_lo + b_hi;
+    if full <= 0.0 {
+        return (0.0, 0.0); // no bleed to creep (NoBleed tiling)
+    }
+    let band = match spec {
+        InnerBleed::Full => return (0.0, 0.0),
+        InnerBleed::Fraction(f) if f.is_finite() => full * f.clamp(0.0, 1.0),
+        InnerBleed::CombinedPt(t) if t.is_finite() => t.max(0.0),
+        // NaN / inf -> treat as Full (no creep) rather than silently cropping everything.
+        InnerBleed::Fraction(_) | InnerBleed::CombinedPt(_) => return (0.0, 0.0),
     };
-    raw.clamp(0.0, bleed)
+    // Retained per edge = half the (clamped) combined band, never more than the smaller available
+    // bleed so the seam can stay centred between the trims.
+    let retained = (band.min(full) / 2.0).min(b_lo).min(b_hi);
+    ((b_lo - retained).max(0.0), (b_hi - retained).max(0.0))
 }
 
-/// Asymmetric form `/BBox` (page space) for an inner-bleed-creep gang cell: full bleed on the
-/// gang's **outer** edges, pulled in by `creep` on edges that face a neighbour, so adjacent cards'
-/// clipped bleeds meet at the centred cut line instead of overlapping. Built in sheet space from the
-/// placed bleed-box `cell` (the placement anchors the bleed box onto it), then mapped back to page
-/// space through the inverse CTM so page `/Rotate` is handled. Row 0 is at the top.
-#[allow(clippy::too_many_arguments)]
+/// Per-edge creep amounts for a gang cell's four inner-facing edges (sheet space).
+#[derive(Clone, Copy, Debug)]
+struct Creep {
+    left: f64,
+    right: f64,
+    bottom: f64,
+    top: f64,
+}
+
+impl Creep {
+    fn any(&self) -> bool {
+        self.left > 0.0 || self.right > 0.0 || self.bottom > 0.0 || self.top > 0.0
+    }
+}
+
+/// Asymmetric form `/BBox` (page space) for an inner-bleed-creep gang cell: full bleed on the gang's
+/// **outer** edges, pulled in (per edge) on edges that face a neighbour, so adjacent cards' clipped
+/// bleeds meet at the centred cut line instead of overlapping. Built in sheet space from the placed
+/// bleed-box `cell` (the placement anchors the bleed box onto it), then mapped back to page space
+/// through the inverse CTM so page `/Rotate` is handled. Row 0 is at the top.
 fn inner_bleed_clip(
     ctm: &Matrix,
     cell: Rect,
-    creep_x: f64,
-    creep_y: f64,
+    creep: Creep,
     r: usize,
     c: usize,
     rows: usize,
@@ -476,16 +505,16 @@ fn inner_bleed_clip(
 ) -> Rect {
     let mut s = cell;
     if c > 0 {
-        s.llx += creep_x; // left neighbour
+        s.llx += creep.left; // left neighbour
     }
     if c + 1 < cols {
-        s.urx -= creep_x; // right neighbour
+        s.urx -= creep.right; // right neighbour
     }
     if r + 1 < rows {
-        s.lly += creep_y; // row below
+        s.lly += creep.bottom; // row below
     }
     if r > 0 {
-        s.ury -= creep_y; // row above
+        s.ury -= creep.top; // row above
     }
     transform_rect_bounds(&ctm.inverse(), s)
 }
@@ -499,7 +528,7 @@ fn inner_bleed_clip(
 /// gang perimeter at the trim cut lines (see `attach_marks` → Gang layout).
 ///
 /// Optional **inner-bleed creep** ([`StepRepeat::inner_bleed`]) crops the shared bleed on
-/// neighbour-facing edges so the cards step closer (the pitch shrinks by `2×creep` per axis, fitting
+/// neighbour-facing edges so the cards step closer (the pitch shrinks by the cropped amount, fitting
 /// more per sheet) while the outer perimeter keeps full bleed and each cut line stays centred
 /// between its two trims. The crop marks follow the moved trims automatically.
 fn plan_step_repeat(
@@ -525,28 +554,42 @@ fn plan_step_repeat(
             BleedMode::Bleed => bleed,
             BleedMode::NoBleed => trim,
         };
-        // Visible (post-rotation) card-box and trim footprints. The cards are identical, so the
-        // per-side bleed is symmetric and can be derived once from the card vs trim footprint.
-        let rotated = |r: Rect| {
-            if rot % 180 == 90 {
-                (r.height(), r.width())
-            } else {
-                (r.width(), r.height())
-            }
+        // Placed card-box footprint (post-rotation, scaled).
+        let (cw, ch) = if rot % 180 == 90 {
+            (card.height(), card.width())
+        } else {
+            (card.width(), card.height())
         };
-        let (cw, ch) = rotated(card);
-        let (tw, th) = rotated(trim);
-        let (pw, ph) = (cw * s, ch * s); // placed card-box footprint
-        let bleed_x = ((pw - tw * s) / 2.0).max(0.0); // per-side bleed, sheet space
-        let bleed_y = ((ph - th * s) / 2.0).max(0.0);
-        let creep_x = creep_per_edge(sr.inner_bleed, bleed_x);
-        let creep_y = creep_per_edge(sr.inner_bleed, bleed_y);
+        let (pw, ph) = (cw * s, ch * s);
+        // Probe placement (a cell exactly the card footprint) to read the per-edge bleed in sheet
+        // space, rotation-correct — the trim's offset within the card box may be asymmetric, so each
+        // side is measured independently rather than assumed symmetric.
+        let probe = place_best(
+            card,
+            rot,
+            Rect::new(0.0, 0.0, pw, ph),
+            sr.scale,
+            false,
+            false,
+        );
+        let pt = transform_rect_bounds(&probe.ctm, trim);
+        let (bl, br) = ((pt.llx).max(0.0), (pw - pt.urx).max(0.0)); // left / right bleed
+        let (bb, bt) = ((pt.lly).max(0.0), (ph - pt.ury).max(0.0)); // bottom / top bleed
+        let (cl, cr) = inner_creeps(sr.inner_bleed, bl, br);
+        let (cb, ct) = inner_creeps(sr.inner_bleed, bb, bt);
+        let creep = Creep {
+            left: cl,
+            right: cr,
+            bottom: cb,
+            top: ct,
+        };
 
-        // Inner-bleed creep shortens the pitch by the cropped amount on both inner edges, so the
-        // cards step closer; the outer perimeter still shows full bleed (block spans `(n-1)·step +
-        // card`). With `InnerBleed::Full` (or no bleed) creep is 0 and the pitch is `card + space`.
-        let step_w = pw - 2.0 * creep_x + sr.h_space_pt;
-        let step_h = ph - 2.0 * creep_y + sr.v_space_pt;
+        // Inner-bleed creep shortens the pitch by the cropped amount on both inner edges of a
+        // boundary, so the cards step closer; the outer perimeter still shows full bleed (block spans
+        // `(n-1)·step + card`). With `InnerBleed::Full` (or no bleed) creep is 0 and the pitch is
+        // `card + space`.
+        let step_w = pw - (cl + cr) + sr.h_space_pt;
+        let step_h = ph - (cb + ct) + sr.v_space_pt;
 
         let cols = fit_count(usable_w, pw, step_w, sr.max_cols);
         let rows = fit_count(usable_h, ph, step_h, sr.max_rows);
@@ -562,7 +605,7 @@ fn plan_step_repeat(
         let ox = margin + (usable_w - block_w) / 2.0;
         let oy = gripper + margin + (usable_h - block_h) / 2.0;
 
-        let creeping = creep_x > 0.0 || creep_y > 0.0;
+        let creeping = creep.any();
         let mut cells = Vec::new();
         for r in 0..rows {
             for c in 0..cols {
@@ -574,7 +617,7 @@ fn plan_step_repeat(
                 // Clip the form: full bleed by default, or asymmetric (inner edges cropped) when
                 // creeping. Full creep reproduces `card` exactly, keeping byte-identical output.
                 let clip = if creeping {
-                    inner_bleed_clip(&p.ctm, cell, creep_x, creep_y, r, c, rows, cols)
+                    inner_bleed_clip(&p.ctm, cell, creep, r, c, rows, cols)
                 } else {
                     card
                 };
@@ -874,7 +917,8 @@ mod tests {
     #[test]
     fn step_repeat_auto_fits_when_uncapped() {
         // 0/0 = fit as many as the sheet allows; Bleed mode steps by the 190×190 *bleed* box on an
-        // 800×800 sheet with a 0.1pt gap → floor((800+0.1)/190.1) = 4 each way.
+        // 800×800 sheet with a 0.1pt gap → floor((800−190)/190.1 + 1) = 4 each way (pitch = card +
+        // space when not creeping).
         let p = plan(&job(step_repeat(0, 0, 0.1, BleedMode::Bleed)), &src(1)).unwrap();
         assert_eq!(p.cell_count(), 16, "4x4 auto-fit");
     }
@@ -1080,6 +1124,88 @@ mod tests {
             (rb.llx - cut).abs() < 1e-6,
             "right clip meets the centred cut"
         );
+    }
+
+    #[test]
+    fn step_repeat_creep_asymmetric_bleed_keeps_seam_on_centred_cut() {
+        // Off-centre trim inside the bleed box: 5pt bleed on the left, 15pt on the right (bL≠bR). The
+        // seam where two clipped bleeds meet must still land on the knife — centred between the two
+        // trims — so the wider edge is cropped more. (Averaging the two bleeds would offset the seam
+        // by (bR−bL)/2 and paint one card's ink past the cut.)
+        let trim = Rect::new(5.0, 10.0, 85.0, 90.0); // bL=5, bR=15, bB=bT=10
+        let bleed = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let media = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let sources = card_src(trim, bleed, media);
+        let p = plan(
+            &card_job(
+                step_repeat_creep(1, 2, 0.0, BleedMode::Bleed, InnerBleed::Fraction(0.5)),
+                400.0,
+                200.0,
+            ),
+            &sources,
+        )
+        .unwrap();
+        let cells = &p.sheets[0].surfaces[0].cells;
+        assert_eq!(cells.len(), 2);
+        // Sort by placed (sheet-space) position: the asymmetric clip leaves both cards' page-space
+        // bbox.llx at 0 (the right card keeps its full small left bleed), so page space won't order.
+        let mut by_x: Vec<&Cell> = cells.iter().collect();
+        by_x.sort_by(|a, b| {
+            transform_rect_bounds(&a.ctm, a.trim)
+                .llx
+                .partial_cmp(&transform_rect_bounds(&b.ctm, b.trim).llx)
+                .unwrap()
+        });
+        let (l, r) = (by_x[0], by_x[1]);
+
+        let lt = transform_rect_bounds(&l.ctm, l.trim);
+        let rt = transform_rect_bounds(&r.ctm, r.trim);
+        let lb = transform_rect_bounds(&l.ctm, l.bbox);
+        let rb = transform_rect_bounds(&r.ctm, r.bbox);
+        let cut = (lt.urx + rt.llx) / 2.0;
+        // The seam sits exactly on the centred cut — neither card's ink crosses it.
+        assert!(
+            (lb.urx - cut).abs() < 1e-6,
+            "left clip meets the centred cut, not offset by (bR−bL)/2: clip_r={} cut={}",
+            lb.urx,
+            cut
+        );
+        assert!(
+            (rb.llx - cut).abs() < 1e-6,
+            "right clip meets the centred cut: clip_l={} cut={}",
+            rb.llx,
+            cut
+        );
+        assert!(
+            lb.urx <= cut + 1e-6,
+            "left card must not paint past the cut"
+        );
+        assert!(
+            rb.llx >= cut - 1e-6,
+            "right card must not paint past the cut"
+        );
+        // Outer edges keep full bleed (page space): left card's left = 0, right card's right = 100.
+        assert!((l.bbox.llx - 0.0).abs() < 1e-6, "left outer bleed full");
+        assert!((r.bbox.urx - 100.0).abs() < 1e-6, "right outer bleed full");
+    }
+
+    #[test]
+    fn inner_creeps_non_finite_falls_back_to_full() {
+        // NaN / inf parameters must crop nothing (Full), never silently remove the whole inner bleed.
+        for spec in [
+            InnerBleed::Fraction(f64::NAN),
+            InnerBleed::Fraction(f64::INFINITY),
+            InnerBleed::CombinedPt(f64::NAN),
+            InnerBleed::CombinedPt(f64::INFINITY),
+        ] {
+            assert_eq!(inner_creeps(spec, 8.5, 8.5), (0.0, 0.0), "{spec:?} -> Full");
+        }
+        // Sanity: finite specs still creep, and symmetric bleed creeps both edges equally.
+        assert_eq!(
+            inner_creeps(InnerBleed::Fraction(0.5), 8.5, 8.5),
+            (4.25, 4.25)
+        );
+        assert_eq!(inner_creeps(InnerBleed::Full, 8.5, 8.5), (0.0, 0.0));
     }
 
     #[test]
