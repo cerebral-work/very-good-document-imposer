@@ -1,6 +1,6 @@
 # Project Status — Very Good Document Imposer
 
-> Internal engineering handoff (non-user-facing). Snapshot: 2026-06-18.
+> Internal engineering handoff (non-user-facing). Snapshot: 2026-06-19.
 > Read this first when resuming with fresh context. Authoritative design lives in
 > `SPEC.md`, `docs/adr/0001-platform-and-stack.md`, and `docs/m1-design.md`.
 
@@ -96,6 +96,50 @@ spikes/spike0-qpdf    feasibility gate + `gen-fixture` (authors CMYK/TrimBox fix
     QR/DataMatrix, embedded fonts (PDF/X). Known minor: colour-bar/barcode/slug all default to the
     Slug region → they stack; give them distinct `region`s, or a furniture layout pass is future work.
 
+- **M1.6 (done — on branch `m1.5-emission`, NOT yet merged to `main`; commits 53a1d3b→66d050b):**
+  Step & Repeat reworked into a "bulletproof" card-sheet gang, cross-checked byte-for-placement
+  against **Quite Imposing** (and the booklet path vs QI on *the-metamorphosis.pdf* — exact CTM
+  match `1.23 0 0 1.23 …`).
+  - **True tight-pack** (was an even n-up grid): tile by the **card box** + spacing, block **centred**
+    in the imageable area. `StepRepeat.rows/cols → max_rows/max_cols` (u32, **0 = fit as many as the
+    sheet allows**, else cap). Helpers `fit_count` / `step_scale` in `plan_step_repeat`.
+  - **Card box = bleed box** when `bleed_mode = Bleed` (default), so neighbours tile **bleed-to-bleed**:
+    bleeds meet (no overlap, no white hairline), each trim sits one bleed inside → the two trim cut
+    marks at an interior boundary are **one bleed apart (6mm for a 3mm bleed)**, cut line centred.
+    `NoBleed` tiles by trim. (Earlier I tried tile-by-trim → 21 with overlapping bleeds; that's wrong
+    for bleed marks. Correct count for the testcard on A3 is **3×6 = 18**.)
+  - **Natural bleed by default** (QI parity): `PageBoxes::effective_bleed` = BleedBox ?? CropBox ??
+    MediaBox, **capped to `MAX_NATURAL_BLEED_PT` (36pt)** per side so an oversized artboard isn't read
+    as a giant bleed (review finding). A strict BleedBox-or-trim **toggle is still TODO**.
+  - **Gang crop marks** (`marks::SurfaceLayout {Independent, Folded, Gang}`, replaced the `folded`
+    bool): Gang draws crop ticks **only on the gang's outer perimeter**, one per distinct cut line,
+    pushed clear of the bleed (never on the print surface / between cards). `gang_crop_marks` +
+    `cluster_coords`. **Single shared cut mark when the file has no bleed; double (each card's trim)
+    when it has bleed** — `has_bleed` per cell; cluster window = ½ the smallest card dim.
+  - Adversarial review (workflow) confirmed + we fixed: unbounded media-as-bleed (→ cap), crop-offset
+    off-sheet (→ cap + perimeter marks), per-card ticks invading neighbours (→ gang perimeter+dedup).
+  - ⚠️ **Workflow hazard learned twice:** review-workflow subagents run `git checkout` and **wipe
+    uncommitted changes** (plan.rs got reverted mid-task). **Commit before launching any workflow.**
+  - `manual-tests/testcard-steprepeat.json` (uses `/Users/ruby/Downloads/testcard.pdf`, 85×55mm card,
+    3mm bleed) and `metamorphosis-booklet.json` are the QI reference jobs.
+
+- **NEXT JOB — optional inner-bleed "creep" (make this work perfectly):** let the user tighten the
+  gang by **cropping the shared inner bleed**, gaining rows/cols. Confirmed design with the owner:
+  - **Default stays FULL inner bleed** (bleed-to-bleed, 6mm between trims). We deliberately differ
+    from QI/Fiery, which **creep to half bleed by default**.
+  - Opt-in via the JobSpec / formula-script / future UI, e.g. *"creep to half bleed"* (fraction) or
+    *"inner combined bleed = 4mm"* (absolute total band between the two trims). Fiery Impose has this.
+  - **Mechanism:** clip each card's **inner-facing** bleed edges shorter (to the requested amount);
+    cards step closer by the cropped amount; the cut/meeting line stays **centred between the two trim
+    marks**; **outer perimeter keeps full bleed**; trim crop marks move inward with the cards. This is
+    the booklet spine-safe-clip idea generalised to grid inner edges (reuse `Matrix::inverse`; per
+    cell decide which edges are shared/interior vs outer/perimeter from its grid position).
+  - **Yield proof:** testcard full-bleed = 1210pt tall → 6 rows (18). Shave ≈0.6mm off each inner
+    bleed → <1190pt → **7 rows → 21** (== QI). So creep is exactly how QI reaches 21.
+  - **Where:** add an inner-bleed field to `StepRepeat` (e.g. `InnerBleed { Full | Fraction(f64) |
+    CombinedPt(f64) }`, default `Full`); step = `card_box − 2×creep` per axis; asymmetric per-cell
+    clip for inner vs outer edges; gang crop marks already follow the (moved) trims.
+
 ## Build / test / run
 
 Requires Rust + a C++ toolchain. On this Mac the qpdf vendored build needs:
@@ -110,11 +154,9 @@ export LIBCLANG_PATH=/Applications/Xcode.app/Contents/Developer/Toolchains/Xcode
 - Fixtures: `cargo run -p spike0-qpdf --bin gen-fixture -- tests/fixtures/cmyk-trim.pdf 4`
 - Dev-only PDF cross-check (not shipped; SPEC §13): `gs -dBATCH -dNOPAUSE -sDEVICE=nullpage out.pdf`.
 
-Test counts (M1.5): 73 passing (53 engine + 10 types + 10 integration), 0 ignored. An adversarial
-multi-agent review (5 dimensions) found + we fixed 3 real defects: slug used StandardEncoding for
-UTF-8 bytes (now `/WinAnsiEncoding` + transcode), crop clamp ignored right/top bleed margins (now
-4-side max), and the collation tab/spine fold mis-anchored on single-cell blank-pad spreads (spine
-is now sheet-centre, robust to 1-cell spreads). All three have regression tests.
+Test counts (M1.6): 80 passing (60 engine + 10 types + 10 integration), 0 ignored. Two adversarial
+multi-agent reviews drove fixes across M1.5/M1.6 (slug `/WinAnsiEncoding`, 4-side crop clamp,
+collation spine anchor, capped natural bleed, gang perimeter/de-dup marks). All have regression tests.
 
 ## Gotchas / lessons (don't rediscover)
 
