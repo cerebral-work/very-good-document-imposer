@@ -322,20 +322,34 @@ fn reflect_about_x(r: Rect, x: f64) -> Rect {
     )
 }
 
-/// Sort + dedup coordinates within a small epsilon. Identical edges (shared down a row/column)
-/// collapse to one; near-coincident edges (the ~0.1pt "double cut" between tight neighbours) stay
-/// distinct, giving the QI double crop marks.
-fn dedup_coords(it: impl Iterator<Item = f64>) -> Vec<f64> {
+/// Sort coordinates, collapse exact duplicates, then chain-cluster any remaining within `tol` into
+/// their mean. With `tol = 1e-6` only identical edges merge (stacked rows/columns), so a tight
+/// neighbour's distinct edge survives as a double cut; with a larger `tol` adjacent-card boundary
+/// pairs merge into one shared cut line.
+fn cluster_coords(it: impl Iterator<Item = f64>, tol: f64) -> Vec<f64> {
     let mut v: Vec<f64> = it.collect();
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     v.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
-    v
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < v.len() {
+        let mut j = i;
+        while j + 1 < v.len() && v[j + 1] - v[j] <= tol {
+            j += 1;
+        }
+        out.push(v[i..=j].iter().sum::<f64>() / (j - i + 1) as f64);
+        i = j + 1;
+    }
+    out
 }
 
-/// Crop marks for a tight gang (step & repeat): one tick per distinct trim cut line, placed only on
-/// the gang's **outer perimeter** (top/bottom ticks for vertical cuts, left/right for horizontal)
-/// and pushed clear of the gang's bleed so they never touch the print surface or run between the
-/// cards (SPEC §8.6: de-duplicate shared cut lines for ganged work).
+/// Crop marks for a tight gang (step & repeat): ticks only on the gang's **outer perimeter**
+/// (top/bottom for vertical cuts, left/right for horizontal), pushed clear of the gang's bleed so
+/// they never touch the print surface or run between the cards (SPEC §8.6).
+///
+/// Whether neighbours get a **single shared** cut mark or a **double** one is decided by bleed: with
+/// no bleed the cards butt and share a cut line (single); **with bleed each card's trim is cut
+/// separately, so the boundary keeps both edges as a double mark** (the QI behaviour).
 fn gang_crop_marks(cells: &[PlacedCell], crop: &CropMarks) -> Vec<MarkPrimitive> {
     let (Some(gt), Some(gb)) = (
         union(cells.iter().map(|c| c.trim)),
@@ -343,8 +357,26 @@ fn gang_crop_marks(cells: &[PlacedCell], crop: &CropMarks) -> Vec<MarkPrimitive>
     ) else {
         return Vec::new();
     };
-    let xs = dedup_coords(cells.iter().flat_map(|c| [c.trim.llx, c.trim.urx]));
-    let ys = dedup_coords(cells.iter().flat_map(|c| [c.trim.lly, c.trim.ury]));
+    let has_bleed = cells.iter().any(|c| {
+        c.bleed.llx < c.trim.llx - 1e-6
+            || c.bleed.urx > c.trim.urx + 1e-6
+            || c.bleed.lly < c.trim.lly - 1e-6
+            || c.bleed.ury > c.trim.ury + 1e-6
+    });
+    // No bleed → merge adjacent-card boundary pairs into a single shared cut. The merge window is
+    // half the smallest card dimension: far wider than any sane inter-card gap, far narrower than a
+    // card, so boundary pairs collapse but distinct cards never do. With bleed → keep both (double).
+    let min_dim = cells
+        .iter()
+        .map(|c| c.trim.width().min(c.trim.height()))
+        .fold(f64::INFINITY, f64::min);
+    let tol = if has_bleed {
+        1e-6
+    } else {
+        (min_dim / 2.0).max(1e-6)
+    };
+    let xs = cluster_coords(cells.iter().flat_map(|c| [c.trim.llx, c.trim.urx]), tol);
+    let ys = cluster_coords(cells.iter().flat_map(|c| [c.trim.lly, c.trim.ury]), tol);
     // Each side's marks start past the gang bleed (+ a small gap so they clear the print surface),
     // or the requested crop offset, whichever is larger.
     let gap = 3.0;
@@ -1031,5 +1063,52 @@ mod tests {
             .filter(|p| matches!(p, MarkPrimitive::FillRect { .. }))
             .count();
         assert!(bars > 10, "a Code-128 symbol has many bars, got {bars}");
+    }
+
+    #[test]
+    fn gang_crop_marks_double_with_bleed_single_without() {
+        // 3 cards in a row, 10pt gaps. With bleed each card's trim is a separate cut → double mark
+        // at each interior boundary (6 distinct vertical cut lines); without bleed neighbours share
+        // the cut → single (4 distinct lines).
+        let row = |bleed_amt: f64| -> Vec<PlacedCell> {
+            (0..3)
+                .map(|i| {
+                    let x0 = i as f64 * 110.0;
+                    let trim = Rect::new(x0, 0.0, x0 + 100.0, 60.0);
+                    let bleed = Rect::new(
+                        trim.llx - bleed_amt,
+                        trim.lly - bleed_amt,
+                        trim.urx + bleed_amt,
+                        trim.ury + bleed_amt,
+                    );
+                    PlacedCell { trim, bleed }
+                })
+                .collect()
+        };
+        let crop = CropMarks::default();
+        let vert_cut_lines = |cells: &[PlacedCell]| {
+            let mut xs: Vec<f64> = gang_crop_marks(cells, &crop)
+                .iter()
+                .filter_map(|p| match p {
+                    MarkPrimitive::Line { from, to, .. } if (from.0 - to.0).abs() < 1e-9 => {
+                        Some((from.0 * 1000.0).round())
+                    }
+                    _ => None,
+                })
+                .collect();
+            xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            xs.dedup();
+            xs.len()
+        };
+        assert_eq!(
+            vert_cut_lines(&row(5.0)),
+            6,
+            "bleed → double interior marks"
+        );
+        assert_eq!(
+            vert_cut_lines(&row(0.0)),
+            4,
+            "no bleed → single shared marks"
+        );
     }
 }
