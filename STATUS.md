@@ -123,22 +123,33 @@ spikes/spike0-qpdf    feasibility gate + `gen-fixture` (authors CMYK/TrimBox fix
   - `manual-tests/testcard-steprepeat.json` (uses `/Users/ruby/Downloads/testcard.pdf`, 85×55mm card,
     3mm bleed) and `metamorphosis-booklet.json` are the QI reference jobs.
 
-- **NEXT JOB — optional inner-bleed "creep" (make this work perfectly):** let the user tighten the
-  gang by **cropping the shared inner bleed**, gaining rows/cols. Confirmed design with the owner:
-  - **Default stays FULL inner bleed** (bleed-to-bleed, 6mm between trims). We deliberately differ
-    from QI/Fiery, which **creep to half bleed by default**.
-  - Opt-in via the JobSpec / formula-script / future UI, e.g. *"creep to half bleed"* (fraction) or
-    *"inner combined bleed = 4mm"* (absolute total band between the two trims). Fiery Impose has this.
-  - **Mechanism:** clip each card's **inner-facing** bleed edges shorter (to the requested amount);
-    cards step closer by the cropped amount; the cut/meeting line stays **centred between the two trim
-    marks**; **outer perimeter keeps full bleed**; trim crop marks move inward with the cards. This is
-    the booklet spine-safe-clip idea generalised to grid inner edges (reuse `Matrix::inverse`; per
-    cell decide which edges are shared/interior vs outer/perimeter from its grid position).
-  - **Yield proof:** testcard full-bleed = 1210pt tall → 6 rows (18). Shave ≈0.6mm off each inner
-    bleed → <1190pt → **7 rows → 21** (== QI). So creep is exactly how QI reaches 21.
-  - **Where:** add an inner-bleed field to `StepRepeat` (e.g. `InnerBleed { Full | Fraction(f64) |
-    CombinedPt(f64) }`, default `Full`); step = `card_box − 2×creep` per axis; asymmetric per-cell
-    clip for inner vs outer edges; gang crop marks already follow the (moved) trims.
+- **M1.7 — inner-bleed "creep" (done — branch `m1.5-emission`, commits 2a32b3d→1ab372b):** the user
+  can tighten the gang by **cropping the shared inner bleed**, gaining rows/cols. Validated to exact
+  **QI parity**: the testcard on A3 is `3×6 = 18` full-bleed and `3×7 = 21` at creep-to-half-bleed.
+  - **`StepRepeat.inner_bleed: InnerBleed { Full | Fraction(f64) | CombinedPt(f64) }`**, default
+    `Full` (serde-tagged like `ScaleMode`: `"full"` / `{"fraction":0.5}` / `{"combined-pt":11.34}`;
+    omitting it is backward-compatible). **Default stays FULL inner bleed** — we deliberately differ
+    from QI/Fiery, which creep to half by default. `Fraction(f)` keeps fraction `f` of the inner
+    bleed (0.5 = "creep to half bleed"); `CombinedPt(t)` sets the combined band between two trims.
+  - **Mechanism** (`plan_step_repeat`): inner-facing bleed edges are cropped so the cards step closer
+    (pitch shrinks by the cropped amount), the **outer perimeter keeps full bleed**, and each cut line
+    stays **centred between its two trims**. The asymmetric clip is built in sheet space and mapped to
+    page space via `Matrix::inverse` (booklet spine-safe-clip generalised to grid inner edges); per
+    cell, neighbour-facing edges are chosen from grid position. `Full`/`NoBleed` keep the bbox = card
+    box exactly (byte-identical to M1.6). Gang crop marks follow the moved trims automatically.
+  - **Per-edge, not averaged** (review fix, 1ab372b): `inner_creeps` measures each side's *true* bleed
+    via a probe placement (rotation-correct) so an **off-centre trim** (asymmetric BleedBox — a legal
+    input) still lands the bleed seam on the centred cut instead of `(bR−bL)/2` past it. Reduces to the
+    old symmetric creep when `bL==bR` (all real jobs). Non-finite `Fraction`/`CombinedPt` → `Full`.
+  - Adversarial review (workflow, again) drove the per-edge fix + the NaN guard; both have regression
+    tests (`…asymmetric_bleed_keeps_seam_on_centred_cut`, `inner_creeps_non_finite_falls_back_to_full`).
+  - `manual-tests/testcard-steprepeat-creep.json` is the creep reference job (`fraction: 0.5` → 21).
+
+- **NEXT JOB — candidates (pick with owner):** (1) **strict BleedBox-or-trim toggle** (the still-TODO
+  from M1.6: a job flag to disable natural-bleed inference so only an explicit BleedBox counts);
+  (2) **merge `m1.5-emission` → `main`** (M1.5/M1.6/M1.7 are all on this branch, unmerged);
+  (3) a deferred furniture/colour item (see M1.5 "Still deferred": work-style reflections, warnings
+  channel for GWG equal-TrimBox flags, hatched bleed fill, cross-spine bleed, QR/DataMatrix).
 
 ## Build / test / run
 
@@ -154,9 +165,10 @@ export LIBCLANG_PATH=/Applications/Xcode.app/Contents/Developer/Toolchains/Xcode
 - Fixtures: `cargo run -p spike0-qpdf --bin gen-fixture -- tests/fixtures/cmyk-trim.pdf 4`
 - Dev-only PDF cross-check (not shipped; SPEC §13): `gs -dBATCH -dNOPAUSE -sDEVICE=nullpage out.pdf`.
 
-Test counts (M1.6): 80 passing (60 engine + 10 types + 10 integration), 0 ignored. Two adversarial
-multi-agent reviews drove fixes across M1.5/M1.6 (slug `/WinAnsiEncoding`, 4-side crop clamp,
-collation spine anchor, capped natural bleed, gang perimeter/de-dup marks). All have regression tests.
+Test counts (M1.7): 85 passing (64 engine + 11 types + 10 integration), 0 ignored. Three adversarial
+multi-agent reviews drove fixes across M1.5/M1.6/M1.7 (slug `/WinAnsiEncoding`, 4-side crop clamp,
+collation spine anchor, capped natural bleed, gang perimeter/de-dup marks, per-edge creep on
+asymmetric bleed, non-finite creep guard). All have regression tests.
 
 ## Gotchas / lessons (don't rediscover)
 
