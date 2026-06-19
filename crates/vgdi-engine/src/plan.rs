@@ -8,7 +8,7 @@ use crate::boxes::PageBoxes;
 use crate::error::{EngineError, Result};
 use crate::geom::{place_best, place_manual, transform_rect_bounds, Matrix};
 use crate::imposition::{perfect_bound_order, saddle_order};
-use crate::marks::{FoldLine, MarkContext, MarkPlan, PlacedCell, SurfaceMarkInput};
+use crate::marks::{FoldLine, MarkContext, MarkPlan, PlacedCell, SurfaceLayout, SurfaceMarkInput};
 use vgdi_types::{
     BleedMode, Duplex, FillOrder, JobSpec, Manual, NUp, PerfectBound, Rect, ScaleMode, Scheme,
     StepRepeat, SurfaceSide, SCHEMA_ID,
@@ -161,10 +161,12 @@ fn attach_marks(plan: &mut ImpositionPlan, job: &JobSpec) {
         .and_then(|s| s.path.file_name())
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let booklet = matches!(
-        job.scheme,
-        Scheme::SaddleStitch(_) | Scheme::PerfectBound(_)
-    );
+    let layout = match job.scheme {
+        Scheme::SaddleStitch(_) | Scheme::PerfectBound(_) => SurfaceLayout::Folded,
+        Scheme::StepRepeat(_) => SurfaceLayout::Gang,
+        _ => SurfaceLayout::Independent,
+    };
+    let booklet = layout == SurfaceLayout::Folded;
     // Collation back-step marks order *gathered* signatures, so they apply to perfect binding only —
     // a saddle-stitch booklet is a single nested signature with nothing to collate.
     let per_sig = sheets_per_signature(job);
@@ -191,7 +193,7 @@ fn attach_marks(plan: &mut ImpositionPlan, job: &JobSpec) {
                 fold_lines: &fold_lines,
                 sheet: sheet_rect,
                 gripper: job.sheet.gripper_pt,
-                folded: booklet,
+                layout,
                 marks: &job.marks,
                 ctx: MarkContext {
                     file_name: &file_name,
@@ -420,46 +422,84 @@ fn check_bleed_gutter(ctm: &Matrix, trim: Rect, bleed: Rect, gutter: f64) -> Res
 
 // --------------------------------------------------------------------------- step & repeat
 
+/// Fixed scale factor for a step (Fit is meaningless for a fixed-step tile → 100%).
+fn step_scale(scale: ScaleMode) -> f64 {
+    match scale {
+        ScaleMode::None | ScaleMode::Fit => 1.0,
+        ScaleMode::Fixed(f) => f,
+    }
+}
+
+/// How many cards fit along an axis, then cap by `max` (0 = no cap).
+fn fit_count(usable: f64, card: f64, space: f64, max: u32) -> usize {
+    if card <= 0.0 {
+        return 0;
+    }
+    let fit = ((usable + space) / (card + space)).floor().max(0.0) as usize;
+    if max == 0 {
+        fit
+    } else {
+        fit.min(max as usize)
+    }
+}
+
+/// Step & Repeat: gang one design per sheet, tiled **tight** — the step is the *trim* box + spacing
+/// (so finished sizes butt with only the cut gap, the standard high-yield gang), the block centred
+/// in the imageable area. Each card's clip is the bleed box (`Bleed`, default: bleeds overlap into
+/// the gaps, no white hairlines) or the trim (`NoBleed`). Count auto-fits unless capped by
+/// `max_rows`/`max_cols`. Crop marks land on the gang perimeter (see `attach_marks` → Gang layout).
 fn plan_step_repeat(
     job: &JobSpec,
     sources: &[SourceInfo],
     sr: &StepRepeat,
 ) -> Result<ImpositionPlan> {
-    if sr.rows == 0 || sr.cols == 0 {
-        return Err(EngineError::EmptyGrid {
-            rows: sr.rows,
-            cols: sr.cols,
-        });
-    }
     let src = primary(sources)?;
     if src.pages.is_empty() {
         return Err(EngineError::EmptySource { id: src.id.clone() });
     }
     let (sw, sh) = (job.sheet.size_pt[0], job.sheet.size_pt[1]);
+    let (gripper, margin) = (job.sheet.gripper_pt, job.sheet.margin_pt);
+    let usable_w = sw - 2.0 * margin;
+    let usable_h = sh - gripper - 2.0 * margin;
+    let s = step_scale(sr.scale);
 
-    // One sheet per source page, fully tiled with that page (gang one design per sheet).
     let mut sheets = Vec::new();
     for page in 0..src.pages.len() {
         let (trim, bleed, rot, cs) = validate_page(src, page)?;
+        // Step by the TRIM (finished cut size); the clip shows the bleed (overlapping) or the trim.
         let clip = match sr.bleed_mode {
             BleedMode::Bleed => bleed,
             BleedMode::NoBleed => trim,
         };
+        let (vw, vh) = if rot % 180 == 90 {
+            (trim.height(), trim.width())
+        } else {
+            (trim.width(), trim.height())
+        };
+        let (pw, ph) = (vw * s, vh * s); // placed trim footprint
+
+        let cols = fit_count(usable_w, pw, sr.h_space_pt, sr.max_cols);
+        let rows = fit_count(usable_h, ph, sr.v_space_pt, sr.max_rows);
+        if cols == 0 {
+            return Err(EngineError::SheetTooSmall { axis: "x" });
+        }
+        if rows == 0 {
+            return Err(EngineError::SheetTooSmall { axis: "y" });
+        }
+
+        let step_w = pw + sr.h_space_pt;
+        let step_h = ph + sr.v_space_pt;
+        let block_w = cols as f64 * pw + (cols as f64 - 1.0) * sr.h_space_pt;
+        let block_h = rows as f64 * ph + (rows as f64 - 1.0) * sr.v_space_pt;
+        let ox = margin + (usable_w - block_w) / 2.0;
+        let oy = gripper + margin + (usable_h - block_h) / 2.0;
+
         let mut cells = Vec::new();
-        for r in 0..sr.rows {
-            for c in 0..sr.cols {
-                let cell = grid_cell_rect(
-                    sw,
-                    sh,
-                    job.sheet.gripper_pt,
-                    job.sheet.margin_pt,
-                    sr.rows,
-                    sr.cols,
-                    sr.h_space_pt,
-                    sr.v_space_pt,
-                    r,
-                    c,
-                )?;
+        for r in 0..rows {
+            for c in 0..cols {
+                let cx = ox + c as f64 * step_w;
+                let cy = oy + (rows - 1 - r) as f64 * step_h; // row 0 at the top
+                let cell = Rect::new(cx, cy, cx + pw, cy + ph);
                 let p = place_best(trim, rot, cell, sr.scale, false, false);
                 cells.push(make_cell(&src.id, page, p.ctm, clip, trim, bleed, cs));
             }
@@ -721,47 +761,111 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn step_repeat_tiles_each_page_on_its_own_sheet() {
-        let sr = Scheme::StepRepeat(StepRepeat {
-            rows: 3,
-            cols: 4,
-            h_space_pt: 10.0,
-            v_space_pt: 10.0,
-            bleed_mode: BleedMode::Bleed,
-            scale: ScaleMode::Fit,
-        });
-        let p = plan(&job(sr), &src(2)).unwrap();
-        assert_eq!(p.sheets.len(), 2, "one sheet per source page");
-        assert_eq!(p.sheets[0].surfaces[0].cells.len(), 12, "3x4 = 12 repeats");
+    fn step_repeat(max_rows: u32, max_cols: u32, space: f64, mode: BleedMode) -> Scheme {
+        Scheme::StepRepeat(StepRepeat {
+            max_rows,
+            max_cols,
+            h_space_pt: space,
+            v_space_pt: space,
+            bleed_mode: mode,
+            scale: ScaleMode::None,
+        })
     }
 
     #[test]
-    fn step_repeat_bleed_mode_uses_bleed_box_as_clip() {
-        let mk = |mode| {
-            Scheme::StepRepeat(StepRepeat {
-                rows: 1,
-                cols: 1,
-                h_space_pt: 0.0,
-                v_space_pt: 0.0,
-                bleed_mode: mode,
-                scale: ScaleMode::None,
+    fn step_repeat_one_sheet_per_page_capped_grid() {
+        let p = plan(&job(step_repeat(3, 4, 10.0, BleedMode::Bleed)), &src(2)).unwrap();
+        assert_eq!(p.sheets.len(), 2, "one sheet per source page");
+        assert_eq!(
+            p.sheets[0].surfaces[0].cells.len(),
+            12,
+            "capped to 3x4 = 12"
+        );
+    }
+
+    #[test]
+    fn step_repeat_auto_fits_when_uncapped() {
+        // 0/0 = fit as many as the sheet allows; stepping by the 180×180 *trim* on an 800×800 sheet
+        // with a 0.1pt gap is floor((800+0.1)/180.1) = 4 each way.
+        let p = plan(&job(step_repeat(0, 0, 0.1, BleedMode::Bleed)), &src(1)).unwrap();
+        assert_eq!(p.cell_count(), 16, "4x4 auto-fit");
+    }
+
+    #[test]
+    fn step_repeat_steps_by_trim_and_centres_with_bleed_clip() {
+        // Two columns of the 180-wide *trim* with a 10pt gap: block = 370 wide, centred on the 800
+        // sheet => left trim at (800-370)/2 = 215, next 190 to the right. Clip is the bleed box.
+        let p = plan(&job(step_repeat(1, 2, 10.0, BleedMode::Bleed)), &src(1)).unwrap();
+        let cells = &p.sheets[0].surfaces[0].cells;
+        assert_eq!(cells.len(), 2);
+        let placed = |c: &Cell| transform_rect_bounds(&c.ctm, c.trim);
+        let (a, b) = (placed(&cells[0]), placed(&cells[1]));
+        let (left, right) = if a.llx <= b.llx { (a, b) } else { (b, a) };
+        assert!(
+            (left.llx - 215.0).abs() < 1e-6,
+            "block centred: left trim at 215"
+        );
+        assert!(
+            (right.llx - left.urx - 10.0).abs() < 1e-6,
+            "tight pack by trim: trim gap == spacing"
+        );
+        // Bleed mode → the form clip is the (overlapping) bleed box, not the trim.
+        assert_eq!(cells[0].bbox, Rect::new(5.0, 5.0, 195.0, 195.0));
+    }
+
+    #[test]
+    fn step_repeat_no_bleed_clips_to_trim() {
+        let p = plan(&job(step_repeat(1, 1, 0.0, BleedMode::NoBleed)), &src(1)).unwrap();
+        assert_eq!(
+            p.sheets[0].surfaces[0].cells[0].bbox,
+            Rect::new(10.0, 10.0, 190.0, 190.0)
+        );
+    }
+
+    #[test]
+    fn step_repeat_rejects_card_larger_than_sheet() {
+        let mut j = job(step_repeat(0, 0, 0.0, BleedMode::Bleed));
+        j.sheet.size_pt = [100.0, 100.0]; // smaller than the 180×180 trim
+        assert!(matches!(
+            plan(&j, &src(1)).unwrap_err(),
+            EngineError::SheetTooSmall { .. }
+        ));
+    }
+
+    #[test]
+    fn step_repeat_crop_marks_stay_on_the_gang_perimeter() {
+        // Gang crop marks must never originate inside the block — only on the outer perimeter.
+        let mut j = job(step_repeat(2, 2, 0.0, BleedMode::Bleed));
+        j.marks.crop = Some(CropMarks::default());
+        let p = plan(&j, &src(1)).unwrap();
+        let surf = &p.sheets[0].surfaces[0];
+        let gt = surf
+            .cells
+            .iter()
+            .map(|c| transform_rect_bounds(&c.ctm, c.trim))
+            .reduce(|a, b| {
+                Rect::new(
+                    a.llx.min(b.llx),
+                    a.lly.min(b.lly),
+                    a.urx.max(b.urx),
+                    a.ury.max(b.ury),
+                )
             })
-        };
-        let bleed = plan(&job(mk(BleedMode::Bleed)), &src(1)).unwrap();
-        let nobleed = plan(&job(mk(BleedMode::NoBleed)), &src(1)).unwrap();
-        let bclip = bleed.sheets[0].surfaces[0].cells[0].bbox;
-        let nclip = nobleed.sheets[0].surfaces[0].cells[0].bbox;
-        assert_eq!(
-            bclip,
-            Rect::new(5.0, 5.0, 195.0, 195.0),
-            "bleed clip = BleedBox"
-        );
-        assert_eq!(
-            nclip,
-            Rect::new(10.0, 10.0, 190.0, 190.0),
-            "no-bleed clip = TrimBox"
-        );
+            .unwrap();
+        let mut ticks = 0;
+        for prim in &surf.marks.primitives {
+            if let crate::marks::MarkPrimitive::Line { from, to, .. } = prim {
+                for (x, y) in [from, to] {
+                    let inside = *x > gt.llx + 1e-6
+                        && *x < gt.urx - 1e-6
+                        && *y > gt.lly + 1e-6
+                        && *y < gt.ury - 1e-6;
+                    assert!(!inside, "crop mark inside the gang at ({x},{y})");
+                }
+                ticks += 1;
+            }
+        }
+        assert!(ticks > 0, "perimeter crop marks were emitted");
     }
 
     #[test]

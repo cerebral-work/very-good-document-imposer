@@ -40,15 +40,25 @@ fn default_no_bleed() -> BleedMode {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StepRepeat {
-    pub rows: u32,
-    pub cols: u32,
-    /// Horizontal / vertical space between repeats, in points.
+    /// Maximum rows to place; **0 = fit as many as the sheet allows** (QI "Max rows").
+    #[serde(default)]
+    pub max_rows: u32,
+    /// Maximum columns to place; **0 = fit as many as the sheet allows** (QI "Max cols").
+    #[serde(default)]
+    pub max_cols: u32,
+    /// Horizontal / vertical space between repeats, in points. The cards tile by their *card box*
+    /// (bleed box when `bleed_mode = Bleed`, else trim) packed tight from the centre — this is the
+    /// inter-card gap, not an even gutter across the whole sheet.
     #[serde(default)]
     pub h_space_pt: Pt,
     #[serde(default)]
     pub v_space_pt: Pt,
+    /// `Bleed` (default) tiles by the bleed box and shows each card's bleed; `NoBleed` tiles by the
+    /// trim and clips to it.
     #[serde(default)]
     pub bleed_mode: BleedMode,
+    /// Per-card scale. `None` = 100% / full size; `Fixed(f)` = `f`×. `Fit` is treated as 100%
+    /// (fit-to-cell is meaningless when tiling at a fixed step).
     #[serde(default)]
     pub scale: ScaleMode,
 }

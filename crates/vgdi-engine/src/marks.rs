@@ -10,9 +10,9 @@
 
 use crate::barcode;
 use vgdi_types::{
-    Barcode, BleedTreatment, CollationMarks, ColorBar, ColorBarKind, CropStyle, FoldMarks,
-    MarkColor, MarkRegion, MarkSet, Rect, RegPositions, Slug, SlugField, SlugPosition, SurfaceSide,
-    Symbology,
+    Barcode, BleedTreatment, CollationMarks, ColorBar, ColorBarKind, CropMarks, CropStyle,
+    FoldMarks, MarkColor, MarkRegion, MarkSet, Rect, RegPositions, Slug, SlugField, SlugPosition,
+    SurfaceSide, Symbology,
 };
 
 /// A positioned vector mark primitive in sheet space (points).
@@ -90,6 +90,21 @@ pub struct MarkContext<'a> {
     pub signature: Option<usize>,
 }
 
+/// How the placed pieces relate, which decides where cut/trim marks go (SPEC §8.6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfaceLayout {
+    /// Independent finished pieces in a grid (n-up): each page framed on its own, marks in the
+    /// gutters around it.
+    Independent,
+    /// One folded leaf (booklet spread): marks frame the whole leaf's outer perimeter; the inner
+    /// spine is a fold, not a cut, so it gets no crop ticks.
+    Folded,
+    /// A tight gang of identical pieces (step & repeat): crop marks only on the gang's **outer
+    /// perimeter**, one tick per distinct cut line, kept clear of the bleed/print surface — never
+    /// between the cards.
+    Gang,
+}
+
 /// All inputs needed to plan one surface's marks.
 pub struct SurfaceMarkInput<'a> {
     pub cells: &'a [PlacedCell],
@@ -97,11 +112,7 @@ pub struct SurfaceMarkInput<'a> {
     /// The sheet media rectangle, `(0, 0, w, h)`.
     pub sheet: Rect,
     pub gripper: f64,
-    /// Whether the placed pages form one folded leaf (a booklet spread) rather than independent
-    /// finished pieces. When folded, cut/trim marks frame the **whole spread's outer perimeter** —
-    /// no crop ticks at the inner spine, which is a fold, not a cut (SPEC §8.6). N-up / step&repeat
-    /// are not folded: each cell is its own piece and gets its own crop marks.
-    pub folded: bool,
+    pub layout: SurfaceLayout,
     pub marks: &'a MarkSet,
     pub ctx: MarkContext<'a>,
 }
@@ -200,24 +211,39 @@ pub fn plan_surface_marks(input: &SurfaceMarkInput) -> MarkPlan {
     // registration in the same place it sits on full spreads — they must align when stacked).
     let mut extent = union(input.cells.iter().map(|c| c.trim));
     let mut bleed_extent = union(input.cells.iter().map(|c| c.bleed));
-    if input.folded {
+    if input.layout == SurfaceLayout::Folded {
         if let Some(sx) = vertical_spine_x(input.fold_lines) {
             extent = extent.map(|e| reflect_about_x(e, sx));
             bleed_extent = bleed_extent.map(|e| reflect_about_x(e, sx));
         }
     }
 
-    // 1. Cut/trim marks (crop / centre / trim-outline / bleed).
-    //    - Folded spread (booklet): frame the *whole leaf* once — the spine between the pages is a
-    //      fold, so it gets no crop ticks (cutting there would slice the fold).
-    //    - Independent cells (n-up / step&repeat): frame each page; they're cut apart.
-    if input.folded {
-        if let (Some(extent), Some(bleed_extent)) = (extent, bleed_extent) {
-            primitives.extend(cell_marks(extent, bleed_extent, input.sheet, marks));
+    // 1. Cut/trim marks (crop / centre / trim-outline / bleed) per layout:
+    //    - Independent (n-up): frame each page; they're cut apart in their own gutters.
+    //    - Folded (booklet): frame the whole leaf once — the spine is a fold, no crop ticks there.
+    //    - Gang (step & repeat): crop marks only on the gang's outer perimeter (one per cut line),
+    //      with the rest of the cut/trim families framed once on the gang extent.
+    match input.layout {
+        SurfaceLayout::Independent => {
+            for c in input.cells {
+                primitives.extend(cell_marks(c.trim, c.bleed, input.sheet, marks));
+            }
         }
-    } else {
-        for c in input.cells {
-            primitives.extend(cell_marks(c.trim, c.bleed, input.sheet, marks));
+        SurfaceLayout::Folded => {
+            if let (Some(extent), Some(bleed_extent)) = (extent, bleed_extent) {
+                primitives.extend(cell_marks(extent, bleed_extent, input.sheet, marks));
+            }
+        }
+        SurfaceLayout::Gang => {
+            if let Some(crop) = &marks.crop {
+                primitives.extend(gang_crop_marks(input.cells, crop));
+            }
+            // Centre / trim-outline / bleed treatment frame the gang extent once (no per-card crop).
+            if let (Some(extent), Some(bleed_extent)) = (extent, bleed_extent) {
+                let mut rest = marks.clone();
+                rest.crop = None;
+                primitives.extend(cell_marks(extent, bleed_extent, input.sheet, &rest));
+            }
         }
     }
 
@@ -294,6 +320,69 @@ fn reflect_about_x(r: Rect, x: f64) -> Rect {
         r.urx.max(2.0 * x - r.llx),
         r.ury,
     )
+}
+
+/// Sort + dedup coordinates within a small epsilon. Identical edges (shared down a row/column)
+/// collapse to one; near-coincident edges (the ~0.1pt "double cut" between tight neighbours) stay
+/// distinct, giving the QI double crop marks.
+fn dedup_coords(it: impl Iterator<Item = f64>) -> Vec<f64> {
+    let mut v: Vec<f64> = it.collect();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    v
+}
+
+/// Crop marks for a tight gang (step & repeat): one tick per distinct trim cut line, placed only on
+/// the gang's **outer perimeter** (top/bottom ticks for vertical cuts, left/right for horizontal)
+/// and pushed clear of the gang's bleed so they never touch the print surface or run between the
+/// cards (SPEC §8.6: de-duplicate shared cut lines for ganged work).
+fn gang_crop_marks(cells: &[PlacedCell], crop: &CropMarks) -> Vec<MarkPrimitive> {
+    let (Some(gt), Some(gb)) = (
+        union(cells.iter().map(|c| c.trim)),
+        union(cells.iter().map(|c| c.bleed)),
+    ) else {
+        return Vec::new();
+    };
+    let xs = dedup_coords(cells.iter().flat_map(|c| [c.trim.llx, c.trim.urx]));
+    let ys = dedup_coords(cells.iter().flat_map(|c| [c.trim.lly, c.trim.ury]));
+    // Each side's marks start past the gang bleed (+ a small gap so they clear the print surface),
+    // or the requested crop offset, whichever is larger.
+    let gap = 3.0;
+    let off_top = crop.offset_pt.max(gb.ury - gt.ury + gap);
+    let off_bot = crop.offset_pt.max(gt.lly - gb.lly + gap);
+    let off_left = crop.offset_pt.max(gt.llx - gb.llx + gap);
+    let off_right = crop.offset_pt.max(gb.urx - gt.urx + gap);
+    let (len, w, col) = (crop.length_pt, crop.weight_pt, &crop.color);
+    let mut out = Vec::new();
+    for x in xs {
+        out.push(line(
+            (x, gt.ury + off_top),
+            (x, gt.ury + off_top + len),
+            w,
+            col,
+        ));
+        out.push(line(
+            (x, gt.lly - off_bot),
+            (x, gt.lly - off_bot - len),
+            w,
+            col,
+        ));
+    }
+    for y in ys {
+        out.push(line(
+            (gt.llx - off_left, y),
+            (gt.llx - off_left - len, y),
+            w,
+            col,
+        ));
+        out.push(line(
+            (gt.urx + off_right, y),
+            (gt.urx + off_right + len, y),
+            w,
+            col,
+        ));
+    }
+    out
 }
 
 // --------------------------------------------------------------------------------- primitives
@@ -736,7 +825,7 @@ mod tests {
             fold_lines: folds,
             sheet: Rect::new(0.0, 0.0, 600.0, 500.0),
             gripper: 0.0,
-            folded: false,
+            layout: SurfaceLayout::Independent,
             marks,
             ctx,
         }
@@ -783,7 +872,7 @@ mod tests {
         let mut ms = MarkSet::default();
         ms.crop = Some(CropMarks::default());
         let mut input = surface_input(&cells, &[], &ms, ctx());
-        input.folded = true;
+        input.layout = SurfaceLayout::Folded;
         let plan = plan_surface_marks(&input);
         let ticks: Vec<_> = plan
             .primitives
@@ -818,7 +907,7 @@ mod tests {
         let mut ms = MarkSet::default();
         ms.crop = Some(CropMarks::default());
         let mut input = surface_input(&cells, &folds, &ms, ctx());
-        input.folded = true;
+        input.layout = SurfaceLayout::Folded;
         let plan = plan_surface_marks(&input);
         let xs: Vec<f64> = plan
             .primitives

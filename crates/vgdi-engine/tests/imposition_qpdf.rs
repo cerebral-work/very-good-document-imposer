@@ -197,12 +197,12 @@ fn step_repeat_renders_tiled_sheet() {
     let job = job_with(
         &src,
         Scheme::StepRepeat(StepRepeat {
-            rows: 2,
-            cols: 3,
+            max_rows: 2,
+            max_cols: 3,
             h_space_pt: 10.0,
             v_space_pt: 10.0,
             bleed_mode: BleedMode::NoBleed,
-            scale: ScaleMode::Fit,
+            scale: ScaleMode::None,
         }),
     );
     let out = tmp("sr_out.pdf");

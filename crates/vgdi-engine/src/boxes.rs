@@ -19,15 +19,35 @@ pub struct PageBoxes {
 /// Float slack (in points) for containment checks. ~1/7000 inch — well below device resolution.
 const EPS: f64 = 0.01;
 
+/// Largest per-side margin (points) treated as *natural* bleed when no BleedBox is declared. ~12.7mm
+/// — generous for real bleeds (typically 3 mm), tight enough that a small trim on an oversized
+/// artboard isn't read as a giant bleed. (Tunable; a future preference can override.)
+const MAX_NATURAL_BLEED_PT: f64 = 36.0;
+
 impl PageBoxes {
     /// The authoritative placement reference: TrimBox, else ArtBox, else `None` (reject).
     pub fn effective_trim(&self) -> Option<Rect> {
         self.trim.or(self.art)
     }
 
-    /// The bleed extent used for bleed-pull: explicit BleedBox, else the trim (no bleed).
+    /// The bleed extent used for bleed-pull. An explicit BleedBox is honoured as-is. Otherwise the
+    /// page's **natural bleed** is recognised — content carried past the trim out to the CropBox,
+    /// else the MediaBox — but **capped** to [`MAX_NATURAL_BLEED_PT`] per side, so an oversized
+    /// artboard (a small trim centred on a huge MediaBox, no BleedBox) is not mistaken for a giant
+    /// bleed. This is the default (QI recognises embedded bleed too); a future preference can force
+    /// strict BleedBox-or-trim behaviour.
     pub fn effective_bleed(&self) -> Option<Rect> {
-        self.bleed.or_else(|| self.effective_trim())
+        if let Some(b) = self.bleed {
+            return Some(b);
+        }
+        let trim = self.effective_trim().unwrap_or(self.media);
+        let natural = self.crop.unwrap_or(self.media);
+        Some(Rect::new(
+            natural.llx.max(trim.llx - MAX_NATURAL_BLEED_PT),
+            natural.lly.max(trim.lly - MAX_NATURAL_BLEED_PT),
+            natural.urx.min(trim.urx + MAX_NATURAL_BLEED_PT),
+            natural.ury.min(trim.ury + MAX_NATURAL_BLEED_PT),
+        ))
     }
 
     /// Enforce `Media ⊇ Bleed ⊇ Trim/Art`. Returns `false` on violation.
@@ -86,6 +106,53 @@ mod tests {
             bleed: None,
         };
         assert!(!b.containment_ok());
+    }
+
+    #[test]
+    fn effective_bleed_recognises_natural_bleed_from_media() {
+        // No explicit BleedBox/CropBox, but the MediaBox has a 3mm margin around the trim — that
+        // margin is the natural bleed (like the testcard / QI default).
+        let b = PageBoxes {
+            media: rect(0.0, 0.0, 100.0, 100.0),
+            crop: None,
+            trim: Some(rect(8.5, 8.5, 91.5, 91.5)),
+            art: None,
+            bleed: None,
+        };
+        assert_eq!(b.effective_bleed().unwrap(), rect(0.0, 0.0, 100.0, 100.0));
+
+        // An explicit BleedBox still wins.
+        let b2 = PageBoxes {
+            bleed: Some(rect(5.0, 5.0, 95.0, 95.0)),
+            ..b
+        };
+        assert_eq!(b2.effective_bleed().unwrap(), rect(5.0, 5.0, 95.0, 95.0));
+
+        // A CropBox is preferred over the MediaBox (don't pull hidden content).
+        let b3 = PageBoxes {
+            bleed: None,
+            crop: Some(rect(3.0, 3.0, 97.0, 97.0)),
+            ..b
+        };
+        assert_eq!(b3.effective_bleed().unwrap(), rect(3.0, 3.0, 97.0, 97.0));
+    }
+
+    #[test]
+    fn natural_bleed_is_capped_for_oversized_artboards() {
+        // A small trim centred on a huge MediaBox (no BleedBox) is an artboard, not a 450pt bleed:
+        // the inferred bleed is capped to 36pt per side around the trim.
+        let b = PageBoxes {
+            media: rect(0.0, 0.0, 1000.0, 1000.0),
+            crop: None,
+            trim: Some(rect(450.0, 450.0, 550.0, 550.0)),
+            art: None,
+            bleed: None,
+        };
+        assert_eq!(
+            b.effective_bleed().unwrap(),
+            rect(414.0, 414.0, 586.0, 586.0),
+            "bleed capped to trim ± 36pt"
+        );
     }
 
     #[test]
