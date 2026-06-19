@@ -87,6 +87,22 @@ impl Matrix {
         }
     }
 
+    /// Inverse of this affine. Every CTM the planner builds is invertible (positive uniform scale +
+    /// 90°-multiple rotation/mirror + translation), so `det != 0`; debug-asserts otherwise.
+    pub fn inverse(&self) -> Matrix {
+        let det = self.a * self.d - self.c * self.b;
+        debug_assert!(det.abs() > f64::EPSILON, "non-invertible matrix");
+        let inv = 1.0 / det;
+        Matrix {
+            a: self.d * inv,
+            b: -self.b * inv,
+            c: -self.c * inv,
+            d: self.a * inv,
+            e: (self.c * self.f - self.d * self.e) * inv,
+            f: (self.b * self.e - self.a * self.f) * inv,
+        }
+    }
+
     /// Apply this matrix to a point.
     pub fn apply(&self, x: f64, y: f64) -> (f64, f64) {
         (
@@ -140,6 +156,30 @@ pub fn fmt(v: f64) -> String {
         s = "0".to_string();
     }
     s
+}
+
+/// Axis-aligned bounds of an arbitrary rectangle after applying matrix `m`. Because every CTM the
+/// planner produces is a multiple-of-90 rotation (optionally mirrored) plus uniform scale and
+/// translation, the transformed rectangle stays axis-aligned, so its bounds are exact — this is how
+/// a source trim/bleed box is mapped into sheet space for mark placement.
+pub fn transform_rect_bounds(m: &Matrix, r: Rect) -> Rect {
+    let mut minx = f64::INFINITY;
+    let mut miny = f64::INFINITY;
+    let mut maxx = f64::NEG_INFINITY;
+    let mut maxy = f64::NEG_INFINITY;
+    for (x, y) in [
+        (r.llx, r.lly),
+        (r.urx, r.lly),
+        (r.llx, r.ury),
+        (r.urx, r.ury),
+    ] {
+        let (rx, ry) = m.apply(x, y);
+        minx = minx.min(rx);
+        miny = miny.min(ry);
+        maxx = maxx.max(rx);
+        maxy = maxy.max(ry);
+    }
+    Rect::new(minx, miny, maxx, maxy)
 }
 
 /// Axis-aligned bounds of the rectangle `[0,w] x [0,h]` after applying matrix `m`.
@@ -357,6 +397,26 @@ mod tests {
         // centered in 300x300: min corner at (125, 100)
         approx(minx, 125.0);
         approx(miny, 100.0);
+    }
+
+    #[test]
+    fn inverse_round_trips_a_rotated_scaled_translate() {
+        let m = Matrix::translate(10.0, 20.0)
+            .compose(&Matrix::scale(2.0, 2.0))
+            .compose(&Matrix::rotate_cw(90));
+        let inv = m.inverse();
+        let (x, y) = m.apply(3.0, 7.0);
+        let (rx, ry) = inv.apply(x, y);
+        approx(rx, 3.0);
+        approx(ry, 7.0);
+        // m ∘ m⁻¹ = identity
+        let id = m.compose(&inv);
+        approx(id.a, 1.0);
+        approx(id.d, 1.0);
+        approx(id.b, 0.0);
+        approx(id.c, 0.0);
+        approx(id.e, 0.0);
+        approx(id.f, 0.0);
     }
 
     #[test]

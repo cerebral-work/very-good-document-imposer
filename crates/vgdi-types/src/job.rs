@@ -81,10 +81,12 @@ mod tests {
                 scale: ScaleMode::Fit,
                 gutter_pt: 0.0,
                 rotate_to_fit: false,
+                bleed_mode: BleedMode::NoBleed,
             }),
             sheet: Sheet {
                 size_pt: [595.276, 841.89],
                 gripper_pt: 0.0,
+                margin_pt: 0.0,
                 work_style: WorkStyle::Sheetwise,
                 flip: None,
             },

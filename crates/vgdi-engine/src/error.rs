@@ -25,6 +25,11 @@ pub enum EngineError {
     #[error("sheet too small for grid + gutters + gripper (cell <= 0 in {axis})")]
     SheetTooSmall { axis: &'static str },
 
+    #[error(
+        "bleed-pull needs gutter ≥ 2× bleed ({needed:.3}pt) between neighbours, but gutter is {gutter:.3}pt"
+    )]
+    InsufficientBleedGutter { gutter: f64, needed: f64 },
+
     // --- Prepress-correctness rejections (SPEC §8) ---
     #[error("page {page} of source `{id}`: no TrimBox or ArtBox; non-conformant for pro prepress")]
     NoTrimOrArt { id: String, page: usize },

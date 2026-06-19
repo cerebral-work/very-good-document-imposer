@@ -10,6 +10,12 @@ pub struct Sheet {
     /// Non-imageable gripper margin reserved on the gripper edge, in points.
     #[serde(default)]
     pub gripper_pt: Pt,
+    /// Imageable-area inset reserved on all four edges, in points. The imposition grid is laid out
+    /// inside `[margin .. size - margin]` (plus the gripper on the gripper edge), leaving a band for
+    /// sheet-edge printer marks (crop/registration/colour bar/slug) so they aren't clipped or laid
+    /// over the outermost pages. Defaults to 0 (fill the sheet).
+    #[serde(default)]
+    pub margin_pt: Pt,
     #[serde(default)]
     pub work_style: WorkStyle,
     /// Optional extra fold-over allowance for the topmost signature (hardcover wrap).

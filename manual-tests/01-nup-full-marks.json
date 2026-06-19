@@ -1,0 +1,15 @@
+{
+  "schema": "vgdi/jobspec@1",
+  "sources": [{ "id": "body", "path": "manual-tests/src-4p.pdf" }],
+  "scheme": { "kind": "n-up", "rows": 2, "cols": 2, "scale": "fit", "gutter_pt": 36.0 },
+  "sheet": { "size_pt": [1190.55, 841.89], "gripper_pt": 28.35, "margin_pt": 36.0 },
+  "marks": {
+    "crop": {},
+    "center": {},
+    "registration": { "positions": "all" },
+    "color_bar": { "region": "head" },
+    "slug": {},
+    "job_barcode": { "symbology": "code128", "data": "JOB-4471", "region": "right" }
+  },
+  "output": { "pdf_version": "1.6" }
+}

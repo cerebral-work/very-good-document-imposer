@@ -12,13 +12,14 @@
 use crate::boxes::PageBoxes;
 use crate::error::{EngineError, Result};
 use crate::geom::fmt;
+use crate::marks::{MarkPlan, MarkPrimitive};
 use crate::plan::{plan, GroupCs, ImpositionPlan, PageGeometry, SourceInfo};
 use qpdf::{
     ObjectStreamMode, QPdf, QPdfArray, QPdfDictionary, QPdfObject, QPdfObjectLike, QPdfObjectType,
     QPdfScalar, QPdfStream,
 };
 use std::path::Path;
-use vgdi_types::{JobSpec, Rect};
+use vgdi_types::{JobSpec, MarkColor, Rect};
 
 /// A source PDF loaded into memory along with its planning geometry.
 pub struct LoadedSource {
@@ -172,6 +173,255 @@ fn rect_object(dst: &QPdf, r: &Rect) -> Result<QPdfObject> {
     .map_err(backend)
 }
 
+// ---------------------------------------------------------------------------------- mark emission
+
+/// Resource needs for a surface's marks: which colour-space / font resources must be declared.
+#[derive(Default)]
+struct MarkResources {
+    /// A `[/Separation /All /DeviceCMYK …]` colorant is referenced (cut/reg marks; SPEC §13).
+    sep_all: bool,
+    /// A Helvetica font is referenced (slug text).
+    font: bool,
+    /// Distinct named spot colorants referenced; emitted as `/Spot{i}` resources.
+    spots: Vec<String>,
+}
+
+/// Scan a [`MarkPlan`] for the colour spaces and fonts its operators will reference.
+fn scan_resources(plan: &MarkPlan) -> MarkResources {
+    let mut res = MarkResources::default();
+    let mut note = |c: &MarkColor| match c {
+        MarkColor::RegistrationAll => res.sep_all = true,
+        MarkColor::Spot(name) => {
+            if !res.spots.iter().any(|s| s == name) {
+                res.spots.push(name.clone());
+            }
+        }
+        MarkColor::Process { .. } => {}
+    };
+    for p in &plan.primitives {
+        match p {
+            MarkPrimitive::Line { color, .. }
+            | MarkPrimitive::Rect { color, .. }
+            | MarkPrimitive::Circle { color, .. }
+            | MarkPrimitive::FillRect { color, .. } => note(color),
+        }
+    }
+    res.font = !plan.texts.is_empty();
+    for t in &plan.texts {
+        note(&t.color);
+    }
+    res
+}
+
+/// The content-stream colour operator for a mark colour (`stroke` selects upper/lower-case ops).
+fn color_op(color: &MarkColor, stroke: bool, res: &MarkResources) -> String {
+    match color {
+        MarkColor::RegistrationAll => {
+            if stroke {
+                "/SepAll CS 1 SCN".into()
+            } else {
+                "/SepAll cs 1 scn".into()
+            }
+        }
+        MarkColor::Process { c, m, y, k } => {
+            let comps = format!("{} {} {} {}", fmt(*c), fmt(*m), fmt(*y), fmt(*k));
+            format!("{comps} {}", if stroke { "K" } else { "k" })
+        }
+        MarkColor::Spot(name) => {
+            let i = res.spots.iter().position(|s| s == name).unwrap_or(0);
+            if stroke {
+                format!("/Spot{i} CS 1 SCN")
+            } else {
+                format!("/Spot{i} cs 1 scn")
+            }
+        }
+    }
+}
+
+/// Approximate a circle as four cubic Béziers (kappa = 0.5523), counter-clockwise from `(cx+r, cy)`.
+fn circle_path(cx: f64, cy: f64, r: f64) -> String {
+    let k = 0.552_284_749_830_793_6 * r;
+    let p = |x: f64, y: f64| format!("{} {}", fmt(x), fmt(y));
+    format!(
+        "{} m {} {} {} c {} {} {} c {} {} {} c {} {} {} c",
+        p(cx + r, cy),
+        p(cx + r, cy + k),
+        p(cx + k, cy + r),
+        p(cx, cy + r),
+        p(cx - k, cy + r),
+        p(cx - r, cy + k),
+        p(cx - r, cy),
+        p(cx - r, cy - k),
+        p(cx - k, cy - r),
+        p(cx, cy - r),
+        p(cx + k, cy - r),
+        p(cx + r, cy - k),
+        p(cx + r, cy),
+    )
+}
+
+/// Transcode a Unicode string to single-byte WinAnsi (CP1252) code units — the encoding declared on
+/// the slug font. ASCII and Latin-1 (0xA0–0xFF) map directly; a few common punctuation code points
+/// map to their CP1252 slots; anything else becomes `?`. This keeps the bytes we emit in agreement
+/// with the font's `/Encoding`, so each byte renders as exactly one intended glyph.
+fn to_winansi(s: &str) -> Vec<u8> {
+    s.chars()
+        .map(|c| {
+            let u = c as u32;
+            if (0x20..=0x7E).contains(&u) || (0xA0..=0xFF).contains(&u) {
+                u as u8
+            } else {
+                match u {
+                    0x20AC => 0x80, // €
+                    0x2026 => 0x85, // …
+                    0x2018 => 0x91, // ‘
+                    0x2019 => 0x92, // ’
+                    0x201C => 0x93, // “
+                    0x201D => 0x94, // ”
+                    0x2022 => 0x95, // •
+                    0x2013 => 0x96, // –
+                    0x2014 => 0x97, // —
+                    _ => b'?',
+                }
+            }
+        })
+        .collect()
+}
+
+/// Escape WinAnsi bytes for a PDF literal `( … )`: backslash + parens escaped, printable ASCII
+/// verbatim, everything else (incl. 0x80–0xFF) as octal `\ooo` so the literal stays clean ASCII.
+fn escape_pdf_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes {
+        match b {
+            b'\\' => out.push_str("\\\\"),
+            b'(' => out.push_str("\\("),
+            b')' => out.push_str("\\)"),
+            0x20..=0x7E => out.push(b as char),
+            _ => out.push_str(&format!("\\{b:03o}")),
+        }
+    }
+    out
+}
+
+/// Emit a surface's mark plan as content-stream operators (already in sheet space). Wrapped in
+/// `q … Q` so the cells' graphics state is untouched.
+fn emit_mark_ops(plan: &MarkPlan, res: &MarkResources) -> String {
+    if plan.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("q\n");
+    for p in &plan.primitives {
+        match p {
+            MarkPrimitive::Line {
+                from,
+                to,
+                weight,
+                color,
+                dash,
+            } => {
+                s.push_str(&color_op(color, true, res));
+                s.push_str(&format!("\n{} w\n", fmt(*weight)));
+                if *dash > 0.0 {
+                    s.push_str(&format!("[{} {}] 0 d\n", fmt(*dash), fmt(*dash)));
+                } else {
+                    s.push_str("[] 0 d\n");
+                }
+                s.push_str(&format!(
+                    "{} {} m {} {} l S\n",
+                    fmt(from.0),
+                    fmt(from.1),
+                    fmt(to.0),
+                    fmt(to.1)
+                ));
+            }
+            MarkPrimitive::Rect {
+                rect,
+                weight,
+                color,
+            } => {
+                s.push_str(&color_op(color, true, res));
+                s.push_str(&format!("\n{} w\n[] 0 d\n", fmt(*weight)));
+                s.push_str(&format!(
+                    "{} {} {} {} re S\n",
+                    fmt(rect.llx),
+                    fmt(rect.lly),
+                    fmt(rect.width()),
+                    fmt(rect.height())
+                ));
+            }
+            MarkPrimitive::Circle {
+                center,
+                radius,
+                weight,
+                color,
+            } => {
+                s.push_str(&color_op(color, true, res));
+                s.push_str(&format!("\n{} w\n[] 0 d\n", fmt(*weight)));
+                s.push_str(&circle_path(center.0, center.1, *radius));
+                s.push_str(" S\n");
+            }
+            MarkPrimitive::FillRect { rect, color } => {
+                s.push_str(&color_op(color, false, res));
+                s.push_str(&format!(
+                    "\n{} {} {} {} re f\n",
+                    fmt(rect.llx),
+                    fmt(rect.lly),
+                    fmt(rect.width()),
+                    fmt(rect.height())
+                ));
+            }
+        }
+    }
+    for t in &plan.texts {
+        s.push_str(&color_op(&t.color, false, res));
+        s.push_str("\nBT\n");
+        s.push_str(&format!("/F1 {} Tf\n", fmt(t.size)));
+        s.push_str(&format!("{} {} Td\n", fmt(t.x), fmt(t.y)));
+        s.push_str(&format!(
+            "({}) Tj\nET\n",
+            escape_pdf_bytes(&to_winansi(&t.text))
+        ));
+    }
+    s.push_str("Q\n");
+    s
+}
+
+/// `[/Separation /All /DeviceCMYK <tint→100% of every process colorant>]` (SPEC §13). The tint
+/// transform is a Type-2 function mapping tint t → (t, t, t, t).
+fn separation_all(dst: &QPdf) -> Result<QPdfObject> {
+    dst.parse_object(
+        "[ /Separation /All /DeviceCMYK \
+         << /FunctionType 2 /Domain [ 0 1 ] /C0 [ 0 0 0 0 ] /C1 [ 1 1 1 1 ] /N 1 >> ]",
+    )
+    .map_err(backend)
+}
+
+/// A named-spot Separation colour space. The DeviceCMYK alternate (100% K at full tint) is a
+/// placeholder — preserving the source's true spot tint transform is deferred prepress work.
+fn separation_spot(dst: &QPdf, name: &str) -> Result<QPdfObject> {
+    dst.parse_object(&format!(
+        "[ /Separation /{} /DeviceCMYK \
+         << /FunctionType 2 /Domain [ 0 1 ] /C0 [ 0 0 0 0 ] /C1 [ 0 0 0 1 ] /N 1 >> ]",
+        pdf_name_escape(name)
+    ))
+    .map_err(backend)
+}
+
+/// Encode an arbitrary string as the body of a PDF name (regular chars pass through; others as
+/// `#xx`), so spot colorant names with spaces/specials stay valid name tokens.
+fn pdf_name_escape(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for b in name.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("#{b:02X}"));
+        }
+    }
+    out
+}
+
 /// Render a plan to PDF bytes using the loaded sources.
 pub fn render(job: &JobSpec, plan: &ImpositionPlan, sources: &[LoadedSource]) -> Result<Vec<u8>> {
     let dst = QPdf::empty();
@@ -227,9 +477,36 @@ pub fn render(job: &JobSpec, plan: &ImpositionPlan, sources: &[LoadedSource]) ->
                 ops.push_str(&format!("q {} cm {} Do Q\n", cell.ctm.to_pdf(), name));
             }
 
+            // Marks/furniture: stroke the planned primitives + slug text in sheet space, after the
+            // placed pages, and declare the colour-space / font resources they reference.
+            let mark_res = scan_resources(&surface.marks);
+            ops.push_str(&emit_mark_ops(&surface.marks, &mark_res));
+
             let content_stream = dst.new_stream(ops.as_bytes());
             let resources = dst.new_dictionary();
             resources.set("/XObject", &xobjects);
+            if mark_res.sep_all || !mark_res.spots.is_empty() {
+                let cs = dst.new_dictionary();
+                if mark_res.sep_all {
+                    cs.set("/SepAll", separation_all(&dst)?);
+                }
+                for (i, name) in mark_res.spots.iter().enumerate() {
+                    cs.set(&format!("/Spot{i}"), separation_spot(&dst, name)?);
+                }
+                resources.set("/ColorSpace", &cs);
+            }
+            if mark_res.font {
+                let fonts = dst.new_dictionary();
+                fonts.set(
+                    "/F1",
+                    dst.parse_object(
+                        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica \
+                         /Encoding /WinAnsiEncoding >>",
+                    )
+                    .map_err(backend)?,
+                );
+                resources.set("/Font", &fonts);
+            }
 
             let page = dst.new_dictionary();
             page.set("/Type", dst.new_name("/Page"));

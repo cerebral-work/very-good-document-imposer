@@ -1,0 +1,12 @@
+{
+  "schema": "vgdi/jobspec@1",
+  "sources": [{ "id": "body", "path": "/Users/ruby/Downloads/the-metamorphosis.pdf" }],
+  "scheme": {
+    "kind": "perfect-bound",
+    "signature_pages": 16,
+    "duplex": "long-edge",
+    "scale": { "fixed": 1.23 }
+  },
+  "sheet": { "size_pt": [841.89, 595.276], "gripper_pt": 0.0, "margin_pt": 0.0 },
+  "output": { "pdf_version": "1.6" }
+}

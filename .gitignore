@@ -25,3 +25,7 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# Manual-test generated fixtures + outputs (regenerate via gen-fixture; see manual-tests/README.md)
+/manual-tests/out/
+/manual-tests/*.pdf

@@ -52,19 +52,49 @@ spikes/spike0-qpdf    feasibility gate + `gen-fixture` (authors CMYK/TrimBox fix
   - Pure ordering (`engine::imposition`): `saddle_order`, `perfect_bound_order` (permutation-tested).
   - Placement: rotate-to-fit, fixed scale, duplex flip, manual mirror/rotate.
   - **Mark geometry** (`engine::marks`): crop (classic/full-line), center, registration (`All`),
-    bleed outline — computed + tested. **Emission is NOT wired yet** (see next).
+    bleed outline — computed + tested.
   - Full toggleable/customizable **MarkSet taxonomy** in `vgdi-types::marks` (crop/center/reg/fold/
     collation/color-bar/slug/autocutter/bleed/barcode/labels/…). Slug + Flip + `ScaleMode::Fixed`.
-- **m1.5 (NEXT — the 3 ignored specs in `crates/vgdi-engine/tests/imposition_qpdf.rs`):**
-  1. **Marks emission** — stroke the computed `MarkPrimitive`s into the sheet content stream in a
-     **Separation colour space named `All`** (Type-2 tint transform → 100% CMYK). Test:
-     `marks_emitted_use_separation_all_colorant`.
-  2. **Bleed-pull** — render content out to the BleedBox band (gutter ≥ 2× bleed). Test:
-     `bleed_pull_extends_visible_content_to_bleed`. (Step&repeat already switches the clip bbox;
-     generalize to all schemes + collision rule.)
-  3. **Slug text + barcodes** — emit slug fields/barcodes. Test: `slug_fields_render_text_in_slug_area`.
-  - Also worth doing in m1.5: fold-mark geometry, collation back-step marks, color-bar geometry,
-    `Flip` allowance rendering, perfector back-side 180° (SPEC §8.9), GWG equal-TrimBox flagging.
+- **M1.5 (done):** the three deferred emission specs are now wired + green (no `#[ignore]` left):
+  1. **Marks emission** — `qpdf_backend` strokes/fills the planned primitives + slug text into the
+     sheet content stream. Cut/reg marks draw in a **Separation `All`** colour space (`[/Separation
+     /All /DeviceCMYK <Type-2 fn C0=[0000] C1=[1111] N=1>]`, declared per-page under
+     `/Resources/ColorSpace/SepAll`); `Process` marks → DeviceCMYK `K`/`k`; named spots → per-job
+     `/Spot{i}` Separations (placeholder 100%-K alternate). Test: `marks_emitted_use_separation_all_colorant`.
+  2. **Bleed-pull** — N-up gained `bleed_mode` (default `NoBleed`); on `Bleed` the form `/BBox` is the
+     BleedBox and a **gutter ≥ 2× placed-bleed** check (`InsufficientBleedGutter`) guards neighbour
+     overlap. Step&repeat already switched the clip. Tests: `bleed_pull_extends_visible_content_to_bleed`,
+     `bleed_pull_rejects_insufficient_gutter`.
+  3. **Slug text + barcodes** — slug tokens resolve to a Helvetica text run (filename/sheet#/surface/
+     custom; DateTime/operator/job#/separation skipped for determinism); Code 128-B encoder
+     (`engine::barcode`) emits `job_barcode` as filled bars. Tests: `slug_fields_render_text_in_slug_area`,
+     `job_barcode_emits_code128_bars`.
+  - Also landed: **per-cell vs sheet-level** mark model (`MarkPlan` on `Surface`, `plan_surface_marks`):
+    crop/centre/trim/bleed per placed page, registration/colour-bar/slug/fold/collation/barcode framed
+    on the imposed content extent; **fold-mark**, **collation back-step**, **colour-bar** geometry;
+    determinism verified (`marks_output_is_byte_deterministic`); gs cross-check render is clean.
+  - **`sheet.margin_pt`** (imageable-area inset, all four edges) added after manual testing showed
+    `Fit` grids fill the sheet edge-to-edge, clipping outer crop marks and overlapping sheet-edge
+    furniture. The grid now lays out inside `[margin .. size−margin]` (+ gripper), reserving a mark
+    band. `manual-tests/*.json` set it (32–40pt). Default 0 = fill the sheet (back-compat).
+  - **Booklet mark correctness** (manual-testing finds): a booklet spread is one *folded leaf*, so
+    (1) cut/trim marks frame the **whole leaf's outer perimeter** — no crop ticks at the spine (a
+    fold, not a cut); on a half-blank (single-cell) spread the frame is reflected about the spine to
+    recover the full leaf, so crop + registration land identically on full and half spreads. (2)
+    **Collation back-step marks are perfect-bound only** — a saddle-stitch booklet is a single
+    nested signature with nothing to collate. `SurfaceMarkInput.folded` + `reflect_about_x` carry
+    this; the spine gets dashed **fold** marks instead. `manual-tests/04` shows it.
+  - **Booklet bleed-pull (spine-safe)**: `SaddleStitch`/`PerfectBound` gained `bleed_mode`. On
+    `Bleed`, each page pulls bleed on its **three outer (cut) edges** but keeps the **spine (fold)
+    edge at trim** — so no ink crosses the fold into the facing page. The asymmetric clip is built in
+    sheet space and mapped back through `Matrix::inverse` (handles `/Rotate` + duplex flip); no
+    gutter check needed since nothing bleeds toward a neighbour. `gen-fixture … bleed` makes a
+    BleedBox fixture (contrasting bleed band); `manual-tests/04` + `03a/b` show it.
+  - **Still deferred** (geometry/types exist, emission/wiring pending): work-style reflections
+    (perfector back-180°/work-and-turn/tumble), **GWG equal-TrimBox** flagging (needs a warnings
+    channel), **Flip** allowance rendering, **hatched** bleed fill, cross-spine (reader-spread) bleed,
+    QR/DataMatrix, embedded fonts (PDF/X). Known minor: colour-bar/barcode/slug all default to the
+    Slug region → they stack; give them distinct `region`s, or a furniture layout pass is future work.
 
 ## Build / test / run
 
@@ -78,9 +108,13 @@ export LIBCLANG_PATH=/Applications/Xcode.app/Contents/Developer/Toolchains/Xcode
 - Lint (CI gate): `cargo clippy --workspace --all-features -- -D warnings` and `cargo fmt --all --check`
 - CLI: `cargo run -p vgdi-cli -- job.json -o out.pdf`  (see `examples/nup-2x2.json`)
 - Fixtures: `cargo run -p spike0-qpdf --bin gen-fixture -- tests/fixtures/cmyk-trim.pdf 4`
-- Ignored specs: `cargo test -p vgdi-engine --features qpdf-backend -- --ignored`
+- Dev-only PDF cross-check (not shipped; SPEC §13): `gs -dBATCH -dNOPAUSE -sDEVICE=nullpage out.pdf`.
 
-Test counts (M1): 44 passing (30 engine + 10 types + 4 integration) + 3 ignored emission specs.
+Test counts (M1.5): 73 passing (53 engine + 10 types + 10 integration), 0 ignored. An adversarial
+multi-agent review (5 dimensions) found + we fixed 3 real defects: slug used StandardEncoding for
+UTF-8 bytes (now `/WinAnsiEncoding` + transcode), crop clamp ignored right/top bleed margins (now
+4-side max), and the collation tab/spine fold mis-anchored on single-cell blank-pad spreads (spine
+is now sheet-centre, robust to 1-cell spreads). All three have regression tests.
 
 ## Gotchas / lessons (don't rediscover)
 
@@ -91,6 +125,12 @@ Test counts (M1): 44 passing (30 engine + 10 types + 4 integration) + 3 ignored 
 - Inheritable page attrs (`/MediaBox`, `/Rotate`, `/Resources`) may live on a `/Parent` Pages node;
   the reader walks `/Parent` (`get_inherited`).
 - clap: a `///` doc comment renders as `--help` text. Copy gaps in CLI use plain `//` + `∑CG`.
+- qpdf writes dictionary keys **sorted** (not insertion order), so building resource/colorspace
+  dicts in any order stays byte-deterministic — confirmed by `marks_output_is_byte_deterministic`.
+- Mark content ops are emitted in **sheet space** (no CTM) appended after the cells' `Do` calls,
+  wrapped in `q … Q`; numbers go through `geom::fmt` for stable formatting.
+- Slug must **never** emit wall-clock (`DateTime`) — it would break byte-determinism; those tokens
+  are skipped. Slug content is operator data (filename/sheet#/surface), not authored copy.
 - Copy rule: never author user-facing copy; mark gaps `∑CG` with a commented spec+sample. CLI help
   strings are provisional (one-time exception). Future-GUI copy gaps remain in `SPEC.md`.
 

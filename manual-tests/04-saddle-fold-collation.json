@@ -1,0 +1,19 @@
+{
+	"schema": "vgdi/jobspec@1",
+	"sources": [{ "id": "body", "path": "manual-tests/src-6p-bleed.pdf" }],
+	"scheme": {
+		"kind": "saddle-stitch",
+		"duplex": "long-edge",
+		"scale": "fit",
+		"spine_pt": 24.0,
+		"bleed_mode": "bleed"
+	},
+	"sheet": { "size_pt": [820.0, 480.0], "gripper_pt": 0.0, "margin_pt": 32.0 },
+	"marks": {
+		"crop": {},
+		"registration": { "positions": "edge-centers" },
+		"fold": {},
+		"slug": {}
+	},
+	"output": { "pdf_version": "1.6" }
+}

@@ -27,6 +27,15 @@ pub struct NUp {
     /// Rotate a page 90° if it then fits the cell better.
     #[serde(default)]
     pub rotate_to_fit: bool,
+    /// Whether to pull each page's bleed band into the cell (form `/BBox` = BleedBox). Defaults
+    /// to `NoBleed`: N-up proofs usually place finished trims. Bleed-pull requires the trim gutter
+    /// to be ≥ 2× the bleed amount so neighbouring bleeds don't overlap (SPEC §8.7).
+    #[serde(default = "default_no_bleed")]
+    pub bleed_mode: BleedMode,
+}
+
+fn default_no_bleed() -> BleedMode {
+    BleedMode::NoBleed
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -53,9 +62,17 @@ pub struct SaddleStitch {
     pub cover: bool,
     #[serde(default)]
     pub scale: ScaleMode,
-    /// Spine gutter between the two pages of a spread, in points.
+    /// Optional spine *allowance* between the two pages of a spread, in points. **Defaults to 0**:
+    /// the two pages butt at the fold (the booklet is pulled together). Non-zero only for unusual
+    /// jobs that need a gap at the fold. This is **not** creep — creep (shingling: inner spreads
+    /// shifted toward the spine to compensate for folded paper caliper) is a separate, optional
+    /// refinement, deferred to v1 (the engine is zero-creep; SPEC §8.8/§10).
     #[serde(default)]
     pub spine_pt: Pt,
+    /// Pull each page's bleed on its three outer (cut) edges; the spine edge is a fold and stays
+    /// clipped to trim. Defaults to `NoBleed`.
+    #[serde(default = "default_no_bleed")]
+    pub bleed_mode: BleedMode,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,8 +83,13 @@ pub struct PerfectBound {
     pub duplex: Duplex,
     #[serde(default)]
     pub scale: ScaleMode,
+    /// Optional spine allowance per spread; **defaults to 0** (pages butt at the fold). See
+    /// [`SaddleStitch::spine_pt`] — this is not creep.
     #[serde(default)]
     pub spine_pt: Pt,
+    /// Spine-safe bleed-pull (outer edges only); see [`SaddleStitch::bleed_mode`]. Defaults to `NoBleed`.
+    #[serde(default = "default_no_bleed")]
+    pub bleed_mode: BleedMode,
 }
 
 /// Fully manual placement: explicit cells per surface (custom layouts, autocutter work).

@@ -1,0 +1,16 @@
+{
+  "schema": "vgdi/jobspec@1",
+  "sources": [{ "id": "body", "path": "manual-tests/src-1p.pdf" }],
+  "scheme": {
+    "kind": "step-repeat",
+    "rows": 3,
+    "cols": 4,
+    "h_space_pt": 18.0,
+    "v_space_pt": 18.0,
+    "bleed_mode": "no-bleed",
+    "scale": "fit"
+  },
+  "sheet": { "size_pt": [1190.55, 841.89], "gripper_pt": 28.35, "margin_pt": 36.0 },
+  "marks": { "crop": {}, "trim_outline": true, "slug": {} },
+  "output": { "pdf_version": "1.6" }
+}

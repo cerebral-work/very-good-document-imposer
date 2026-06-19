@@ -1,0 +1,14 @@
+{
+	"schema": "vgdi/jobspec@1",
+	"sources": [{ "id": "body", "path": "manual-tests/src-16p.pdf" }],
+	"scheme": {
+		"kind": "perfect-bound",
+		"signature_pages": 8,
+		"duplex": "long-edge",
+		"scale": "fit",
+		"spine_pt": 24.0
+	},
+	"sheet": { "size_pt": [820.0, 480.0], "gripper_pt": 0.0, "margin_pt": 32.0 },
+	"marks": { "crop": {}, "collation": {}, "slug": {} },
+	"output": { "pdf_version": "1.6" }
+}

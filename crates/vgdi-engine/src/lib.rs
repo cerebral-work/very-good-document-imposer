@@ -4,6 +4,7 @@
 //! The planner, geometry kernel, ordering, and mark geometry are pure and PDF-backend-independent;
 //! the actual PDF read/write lives behind the `qpdf-backend` feature (SPEC §5).
 
+pub mod barcode;
 pub mod boxes;
 pub mod error;
 pub mod geom;

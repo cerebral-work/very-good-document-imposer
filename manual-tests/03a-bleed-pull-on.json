@@ -1,0 +1,19 @@
+{
+	"schema": "vgdi/jobspec@1",
+	"sources": [{ "id": "body", "path": "manual-tests/src-4p-bleed.pdf" }],
+	"scheme": {
+		"kind": "n-up",
+		"rows": 2,
+		"cols": 2,
+		"scale": "fit",
+		"gutter_pt": 40.0,
+		"bleed_mode": "bleed"
+	},
+	"sheet": { "size_pt": [900.0, 900.0], "gripper_pt": 0.0, "margin_pt": 20.0 },
+	"marks": {
+		"crop": {},
+		"trim_outline": true,
+		"bleed": { "kind": "outline", "weight_pt": 0.75 }
+	},
+	"output": { "pdf_version": "1.6" }
+}
