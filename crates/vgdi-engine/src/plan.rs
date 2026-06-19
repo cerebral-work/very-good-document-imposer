@@ -443,11 +443,13 @@ fn fit_count(usable: f64, card: f64, space: f64, max: u32) -> usize {
     }
 }
 
-/// Step & Repeat: gang one design per sheet, tiled **tight** — the step is the *trim* box + spacing
-/// (so finished sizes butt with only the cut gap, the standard high-yield gang), the block centred
-/// in the imageable area. Each card's clip is the bleed box (`Bleed`, default: bleeds overlap into
-/// the gaps, no white hairlines) or the trim (`NoBleed`). Count auto-fits unless capped by
-/// `max_rows`/`max_cols`. Crop marks land on the gang perimeter (see `attach_marks` → Gang layout).
+/// Step & Repeat: gang one design per sheet, tiled **tight** by the *card box* — the **bleed box**
+/// when `Bleed` (default), so neighbours tile bleed-to-bleed: their bleeds meet (no overlap, no
+/// hairline) and each card's trim sits 3 mm inside, leaving the proper bleed band between trims (the
+/// two trim crop marks end up one bleed apart, ≈6 mm for a 3 mm bleed). `NoBleed` tiles by the trim.
+/// `h_space_pt`/`v_space_pt` add a gap *between card boxes* (default 0). The block is centred in the
+/// imageable area; count auto-fits unless capped by `max_rows`/`max_cols`. Crop marks sit on the
+/// gang perimeter at the trim cut lines (see `attach_marks` → Gang layout).
 fn plan_step_repeat(
     job: &JobSpec,
     sources: &[SourceInfo],
@@ -466,17 +468,17 @@ fn plan_step_repeat(
     let mut sheets = Vec::new();
     for page in 0..src.pages.len() {
         let (trim, bleed, rot, cs) = validate_page(src, page)?;
-        // Step by the TRIM (finished cut size); the clip shows the bleed (overlapping) or the trim.
-        let clip = match sr.bleed_mode {
+        // The card box each repeat occupies (and shows): the bleed box (bleeds meet) or the trim.
+        let card = match sr.bleed_mode {
             BleedMode::Bleed => bleed,
             BleedMode::NoBleed => trim,
         };
         let (vw, vh) = if rot % 180 == 90 {
-            (trim.height(), trim.width())
+            (card.height(), card.width())
         } else {
-            (trim.width(), trim.height())
+            (card.width(), card.height())
         };
-        let (pw, ph) = (vw * s, vh * s); // placed trim footprint
+        let (pw, ph) = (vw * s, vh * s); // placed card-box footprint
 
         let cols = fit_count(usable_w, pw, sr.h_space_pt, sr.max_cols);
         let rows = fit_count(usable_h, ph, sr.v_space_pt, sr.max_rows);
@@ -500,8 +502,9 @@ fn plan_step_repeat(
                 let cx = ox + c as f64 * step_w;
                 let cy = oy + (rows - 1 - r) as f64 * step_h; // row 0 at the top
                 let cell = Rect::new(cx, cy, cx + pw, cy + ph);
-                let p = place_best(trim, rot, cell, sr.scale, false, false);
-                cells.push(make_cell(&src.id, page, p.ctm, clip, trim, bleed, cs));
+                // Anchor the card box on the cell; the trim (inset by the bleed) lands inside it.
+                let p = place_best(card, rot, cell, sr.scale, false, false);
+                cells.push(make_cell(&src.id, page, p.ctm, card, trim, bleed, cs));
             }
         }
         sheets.push(one_surface_sheet(sw, sh, cells));
@@ -785,32 +788,47 @@ mod tests {
 
     #[test]
     fn step_repeat_auto_fits_when_uncapped() {
-        // 0/0 = fit as many as the sheet allows; stepping by the 180×180 *trim* on an 800×800 sheet
-        // with a 0.1pt gap is floor((800+0.1)/180.1) = 4 each way.
+        // 0/0 = fit as many as the sheet allows; Bleed mode steps by the 190×190 *bleed* box on an
+        // 800×800 sheet with a 0.1pt gap → floor((800+0.1)/190.1) = 4 each way.
         let p = plan(&job(step_repeat(0, 0, 0.1, BleedMode::Bleed)), &src(1)).unwrap();
         assert_eq!(p.cell_count(), 16, "4x4 auto-fit");
     }
 
     #[test]
-    fn step_repeat_steps_by_trim_and_centres_with_bleed_clip() {
-        // Two columns of the 180-wide *trim* with a 10pt gap: block = 370 wide, centred on the 800
-        // sheet => left trim at (800-370)/2 = 215, next 190 to the right. Clip is the bleed box.
+    fn step_repeat_tiles_by_bleed_box_with_trim_inset() {
+        // Bleed mode tiles by the 190-wide *bleed* box: block = 2*190+10 = 390, centred on the 800
+        // sheet → bleed boxes at 205 and 405 (meeting with the 10pt gap). Each trim sits 5pt inside
+        // its bleed, so the two cut lines end up gap + 2×bleed = 20pt apart; clip = the bleed box.
         let p = plan(&job(step_repeat(1, 2, 10.0, BleedMode::Bleed)), &src(1)).unwrap();
         let cells = &p.sheets[0].surfaces[0].cells;
         assert_eq!(cells.len(), 2);
-        let placed = |c: &Cell| transform_rect_bounds(&c.ctm, c.trim);
-        let (a, b) = (placed(&cells[0]), placed(&cells[1]));
-        let (left, right) = if a.llx <= b.llx { (a, b) } else { (b, a) };
-        assert!(
-            (left.llx - 215.0).abs() < 1e-6,
-            "block centred: left trim at 215"
+        assert_eq!(
+            cells[0].bbox,
+            Rect::new(5.0, 5.0, 195.0, 195.0),
+            "clip = bleed box"
         );
-        assert!(
-            (right.llx - left.urx - 10.0).abs() < 1e-6,
-            "tight pack by trim: trim gap == spacing"
+        let placed = |c: &Cell, r: Rect| transform_rect_bounds(&c.ctm, r);
+        let mut by_x: Vec<&Cell> = cells.iter().collect();
+        by_x.sort_by(|a, b| {
+            placed(a, a.bleed)
+                .llx
+                .partial_cmp(&placed(b, b.bleed).llx)
+                .unwrap()
+        });
+        let (lb, rb) = (
+            placed(by_x[0], by_x[0].bleed),
+            placed(by_x[1], by_x[1].bleed),
         );
-        // Bleed mode → the form clip is the (overlapping) bleed box, not the trim.
-        assert_eq!(cells[0].bbox, Rect::new(5.0, 5.0, 195.0, 195.0));
+        assert!((lb.llx - 205.0).abs() < 1e-6, "bleed block centred at 205");
+        assert!(
+            (rb.llx - lb.urx - 10.0).abs() < 1e-6,
+            "bleed boxes tile bleed-to-bleed with the gap"
+        );
+        let (lt, rt) = (placed(by_x[0], by_x[0].trim), placed(by_x[1], by_x[1].trim));
+        assert!(
+            (rt.llx - lt.urx - 20.0).abs() < 1e-6,
+            "cut lines separated by gap + 2× bleed (proper bleed band)"
+        );
     }
 
     #[test]
