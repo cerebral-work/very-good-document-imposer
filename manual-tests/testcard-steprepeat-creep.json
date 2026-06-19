@@ -1,0 +1,17 @@
+{
+  "schema": "vgdi/jobspec@1",
+  "sources": [{ "id": "card", "path": "/Users/ruby/Downloads/testcard.pdf" }],
+  "scheme": {
+    "kind": "step-repeat",
+    "max_rows": 0,
+    "max_cols": 0,
+    "h_space_pt": 0.0,
+    "v_space_pt": 0.0,
+    "bleed_mode": "bleed",
+    "inner_bleed": { "fraction": 0.5 },
+    "scale": "none"
+  },
+  "sheet": { "size_pt": [841.89, 1190.551], "gripper_pt": 0.0, "margin_pt": 0.0 },
+  "marks": { "crop": {} },
+  "output": { "pdf_version": "1.6" }
+}

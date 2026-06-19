@@ -57,10 +57,42 @@ pub struct StepRepeat {
     /// trim and clips to it.
     #[serde(default)]
     pub bleed_mode: BleedMode,
+    /// Optional inner-bleed **creep**: crop the shared bleed on edges that face a neighbour so the
+    /// cards step closer (more per sheet), while the outer perimeter keeps full bleed and the cut
+    /// line stays centred between the two trims. Default [`InnerBleed::Full`] keeps the whole bleed
+    /// (bleed-to-bleed — VGDI's deliberate default, unlike QI/Fiery which creep to half). Ignored in
+    /// `NoBleed` mode (nothing to creep).
+    #[serde(default)]
+    pub inner_bleed: InnerBleed,
     /// Per-card scale. `None` = 100% / full size; `Fixed(f)` = `f`×. `Fit` is treated as 100%
     /// (fit-to-cell is meaningless when tiling at a fixed step).
     #[serde(default)]
     pub scale: ScaleMode,
+}
+
+/// How much of the **inner** (shared, between-card) bleed a step-&-repeat gang keeps. The gang's
+/// outer perimeter always keeps full bleed; this crops only the bleed on neighbour-facing edges,
+/// letting the cards step closer. The two retained inner bleeds meet at the cut line, which stays
+/// centred between the two adjacent trims (the trim crop marks move inward with the cards).
+///
+/// Generalises the booklet spine-safe clip to grid inner edges. The default is `Full`; QI/Fiery
+/// Impose default to creeping to half bleed, which is how they fit one extra row/column.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InnerBleed {
+    /// Keep the whole bleed on inner edges — neighbours tile bleed-to-bleed (≈6 mm between trims for
+    /// a 3 mm bleed). The VGDI default.
+    #[default]
+    Full,
+    /// Keep this fraction of each inner edge's bleed (clamped to `0..=1`). `0.5` is "creep to half
+    /// bleed"; `1.0` ≡ [`Full`](InnerBleed::Full); `0.0` removes the inner bleed entirely (trims meet
+    /// at the cut, no shared bleed).
+    Fraction(f64),
+    /// Set the **combined** inner bleed band between two adjacent trims to this many points — the sum
+    /// of the two retained inner bleeds, split evenly (each edge keeps half). e.g. `11.34` ≈ 4 mm.
+    /// Clamped per edge to the available bleed, so a value `≥ 2×bleed` behaves as
+    /// [`Full`](InnerBleed::Full) and `0` removes the inner bleed.
+    CombinedPt(f64),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

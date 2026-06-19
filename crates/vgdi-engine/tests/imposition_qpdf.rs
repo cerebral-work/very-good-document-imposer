@@ -202,6 +202,7 @@ fn step_repeat_renders_tiled_sheet() {
             h_space_pt: 10.0,
             v_space_pt: 10.0,
             bleed_mode: BleedMode::NoBleed,
+            inner_bleed: vgdi_types::InnerBleed::Full,
             scale: ScaleMode::None,
         }),
     );

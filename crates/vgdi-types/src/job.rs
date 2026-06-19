@@ -122,4 +122,35 @@ mod tests {
         let back: ScaleMode = serde_json::from_str(&j).unwrap();
         assert_eq!(back, ScaleMode::Fixed(1.5));
     }
+
+    #[test]
+    fn inner_bleed_variants_roundtrip_and_default_is_full() {
+        // Tagged like ScaleMode: "full" / {"fraction": 0.5} / {"combined-pt": 11.34}.
+        for v in [
+            InnerBleed::Full,
+            InnerBleed::Fraction(0.5),
+            InnerBleed::CombinedPt(11.34),
+        ] {
+            let j = serde_json::to_string(&v).unwrap();
+            assert_eq!(serde_json::from_str::<InnerBleed>(&j).unwrap(), v);
+        }
+        assert_eq!(
+            serde_json::from_str::<InnerBleed>("\"full\"").unwrap(),
+            InnerBleed::Full
+        );
+        assert_eq!(InnerBleed::default(), InnerBleed::Full);
+
+        // A step-repeat JobSpec omitting inner_bleed defaults to Full.
+        let json = r#"{
+            "schema": "vgdi/jobspec@1",
+            "sources": [{"id": "card", "path": "c.pdf"}],
+            "scheme": {"kind": "step-repeat"},
+            "sheet": {"size_pt": [800.0, 600.0]}
+        }"#;
+        let job: JobSpec = serde_json::from_str(json).unwrap();
+        match job.scheme {
+            Scheme::StepRepeat(sr) => assert_eq!(sr.inner_bleed, InnerBleed::Full),
+            _ => panic!("expected step-repeat"),
+        }
+    }
 }
