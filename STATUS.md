@@ -196,5 +196,10 @@ must be permissive — Slint is out); JDF/CIP3 priority; first-platform lead; si
 ## CI
 
 `.github/workflows/ci.yml`: 3-OS matrix (pure / spike0 vendored build / cargo-deny licenses /
-fmt+clippy). Windows + Linux legs of Spike-0 are wired but **not yet confirmed green** (no runner
-locally) — a Windows MSVC static-link failure is the trigger to evaluate the pure-Rust `lopdf` path.
+fmt+clippy). **All 8 jobs confirmed GREEN on GitHub Actions** (first run after publishing to
+`cerebral-work/very-good-document-imposer`, 2026-06-20). **Vendored qpdf static-links cleanly on
+Windows MSVC + Ubuntu + macOS** — the documented Windows-MSVC-static-link risk did NOT materialise,
+so the pure-Rust `lopdf` fallback (SPEC §16 / ADR-0001 trigger) is **not needed**; the qpdf object-
+model path is validated cross-platform. (First green run required a one-line fix: the `spike0-qpdf`
+crate ships two binaries, so CI's `cargo run -p spike0-qpdf` was ambiguous and errored *before*
+building qpdf — fixed with `default-run = "spike0-qpdf"`, commit 2b56c8f.)
