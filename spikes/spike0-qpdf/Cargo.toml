@@ -7,6 +7,9 @@ license.workspace = true
 authors.workspace = true
 publish = false
 description = "Spike-0: prove vendored qpdf static-link + page→form-XObject placement + deterministic output on macOS/Windows/Linux. Throwaway CI feasibility gate (ADR-0001 follow-ups)."
+# Crate ships two binaries (this gate + the auto-detected src/bin/gen-fixture.rs), so a bare
+# `cargo run -p spike0-qpdf` is ambiguous — pin the feasibility gate as the default (CI runs it).
+default-run = "spike0-qpdf"
 
 [[bin]]
 name = "spike0-qpdf"

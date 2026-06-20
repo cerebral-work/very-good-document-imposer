@@ -18,6 +18,8 @@ Cargo.lock.bak
 /tests/_out/
 /tests/_scratch/
 *.tmp.pdf
+# Spike-0 feasibility-gate output (default name, written to CWD; CI runs the gate too)
+/spike0-out.pdf
 
 # OS / editor cruft
 .DS_Store
