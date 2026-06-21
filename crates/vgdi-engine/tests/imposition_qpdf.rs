@@ -80,6 +80,7 @@ fn nup(rows: u32, cols: u32, bleed: BleedMode) -> Scheme {
         gutter_pt: 0.0,
         rotate_to_fit: false,
         bleed_mode: bleed,
+        back: None,
     })
 }
 
@@ -96,6 +97,7 @@ fn nup_scale_none(bleed: BleedMode) -> Scheme {
         gutter_pt: 0.0,
         rotate_to_fit: false,
         bleed_mode: bleed,
+        back: None,
     })
 }
 
@@ -204,6 +206,7 @@ fn step_repeat_renders_tiled_sheet() {
             bleed_mode: BleedMode::NoBleed,
             inner_bleed: vgdi_types::InnerBleed::Full,
             scale: ScaleMode::None,
+            back: None,
         }),
     );
     let out = tmp("sr_out.pdf");
@@ -304,6 +307,7 @@ fn bleed_pull_rejects_insufficient_gutter() {
             gutter_pt: 4.0, // < 2 × 5pt bleed
             rotate_to_fit: false,
             bleed_mode: BleedMode::Bleed,
+            back: None,
         }),
     );
     let out = tmp("bleed_gutter_out.pdf");

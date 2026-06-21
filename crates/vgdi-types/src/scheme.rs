@@ -32,10 +32,26 @@ pub struct NUp {
     /// to be ≥ 2× the bleed amount so neighbouring bleeds don't overlap (SPEC §8.7).
     #[serde(default = "default_no_bleed")]
     pub bleed_mode: BleedMode,
+    /// Optional duplex back surface (M2 work styles). When set, the sheet's [`crate::WorkStyle`]
+    /// positions a back surface so it registers to the front after the press flip. See [`BackSpec`].
+    #[serde(default)]
+    pub back: Option<BackSpec>,
 }
 
 fn default_no_bleed() -> BleedMode {
     BleedMode::NoBleed
+}
+
+/// Duplex back surface for a gang / N-up scheme (M2). The back artwork is a **second source** (real
+/// pages, never a content mirror of the front); back cell `(r,c)` pairs 1:1 with front cell `(r,c)`
+/// by fill order, and its position comes from the sheet's [`crate::WorkStyle`] transform. **v1
+/// constraint:** each back page's TrimBox must match its paired front page's (size), so the cut
+/// registers — a mismatch is rejected, not silently best-fit. Differing back sizes are future work.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BackSpec {
+    /// Source id (declared in `job.sources`) supplying the back artwork. Must have the same page
+    /// count as the front source (1:1 pairing).
+    pub source: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -68,6 +84,10 @@ pub struct StepRepeat {
     /// (fit-to-cell is meaningless when tiling at a fixed step).
     #[serde(default)]
     pub scale: ScaleMode,
+    /// Optional duplex back surface (M2 work styles). The back gang repeats the back design, mirrored
+    /// per the sheet's [`crate::WorkStyle`]. See [`BackSpec`].
+    #[serde(default)]
+    pub back: Option<BackSpec>,
 }
 
 /// How much of the **inner** (shared, between-card) bleed a step-&-repeat gang keeps. The gang's

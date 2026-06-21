@@ -30,6 +30,24 @@ pub enum EngineError {
     )]
     InsufficientBleedGutter { gutter: f64, needed: f64 },
 
+    // --- M2 work styles / duplex back ---
+    #[error("work style `{0}` not yet supported for a duplex gang/n-up back (M2 phase 2)")]
+    WorkStyleUnsupported(&'static str),
+
+    #[error(
+        "back source `{back}` has {back_pages} page(s) but the front needs {front_pages} (1:1 pairing)"
+    )]
+    BackCountMismatch {
+        back: String,
+        back_pages: usize,
+        front_pages: usize,
+    },
+
+    #[error(
+        "back source `{back}` page {page}: trim/bleed geometry must match the paired front page (v1 requires equal size)"
+    )]
+    BackGeometryMismatch { back: String, page: usize },
+
     // --- Prepress-correctness rejections (SPEC §8) ---
     #[error("page {page} of source `{id}`: no TrimBox or ArtBox; non-conformant for pro prepress")]
     NoTrimOrArt { id: String, page: usize },

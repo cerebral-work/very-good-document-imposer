@@ -6,12 +6,12 @@
 
 use crate::boxes::PageBoxes;
 use crate::error::{EngineError, Result};
-use crate::geom::{place_best, place_manual, transform_rect_bounds, Matrix};
+use crate::geom::{place_best, place_manual, reflect_x, transform_rect_bounds, Matrix};
 use crate::imposition::{perfect_bound_order, saddle_order};
 use crate::marks::{FoldLine, MarkContext, MarkPlan, PlacedCell, SurfaceLayout, SurfaceMarkInput};
 use vgdi_types::{
-    BleedMode, Duplex, FillOrder, InnerBleed, JobSpec, Manual, NUp, PerfectBound, Rect, ScaleMode,
-    Scheme, StepRepeat, SurfaceSide, SCHEMA_ID,
+    BackSpec, BleedMode, Duplex, FillOrder, InnerBleed, JobSpec, Manual, NUp, PerfectBound, Rect,
+    ScaleMode, Scheme, StepRepeat, SurfaceSide, WorkStyle, SCHEMA_ID,
 };
 
 /// Geometry of one source page needed for planning.
@@ -353,11 +353,19 @@ fn plan_nup(job: &JobSpec, sources: &[SourceInfo], n: &NUp) -> Result<Imposition
     let per_sheet = (n.rows * n.cols) as usize;
     let has_neighbor = n.rows > 1 || n.cols > 1;
 
+    // Optional duplex back (M2). `work_style` only takes effect when a back is configured.
+    let ws = job.sheet.work_style;
+    let back_src = resolve_back(sources, n.back.as_ref(), src.pages.len())?;
+    if back_src.is_some() {
+        ensure_duplex_work_style(ws)?;
+    }
+
     let mut sheets = Vec::new();
-    let mut cells = Vec::new();
+    let mut front = Vec::new();
+    let mut back = Vec::new();
     for page in 0..src.pages.len() {
         let (trim, bleed, rot, cs) = validate_page(src, page)?;
-        let slot = cells.len();
+        let slot = front.len();
         let (r, c) = slot_to_rowcol(slot, n.rows, n.cols, n.fill);
         let cell = grid_cell_rect(
             sw,
@@ -380,26 +388,146 @@ fn plan_nup(job: &JobSpec, sources: &[SourceInfo], n: &NUp) -> Result<Imposition
         if matches!(n.bleed_mode, BleedMode::Bleed) && has_neighbor {
             check_bleed_gutter(&p.ctm, trim, bleed, n.gutter_pt)?;
         }
-        cells.push(make_cell(&src.id, page, p.ctm, clip, trim, bleed, cs));
-        if cells.len() == per_sheet {
-            sheets.push(one_surface_sheet(sw, sh, std::mem::take(&mut cells)));
+
+        // Paired back cell: place the back page upright into the work-style-reflected cell. Equal
+        // geometry (validated) ⇒ the bleed gutter already checked on the front holds for the back.
+        if let Some(bsrc) = back_src {
+            let (bt, bb, brot, bcs) = validate_page(bsrc, page)?;
+            require_back_geometry(&bsrc.id, page, trim, bleed, bt, bb)?;
+            let bcell = work_style_reflect(cell, ws, sw);
+            let bp = place_best(bt, brot, bcell, n.scale, n.rotate_to_fit, false);
+            let bclip = back_clip(&p.ctm, clip, &bp.ctm, ws, sw);
+            back.push(make_cell(&bsrc.id, page, bp.ctm, bclip, bt, bb, bcs));
+        }
+
+        front.push(make_cell(&src.id, page, p.ctm, clip, trim, bleed, cs));
+        if front.len() == per_sheet {
+            sheets.push(duplex_sheet(
+                sw,
+                sh,
+                std::mem::take(&mut front),
+                std::mem::take(&mut back),
+            ));
         }
     }
-    if !cells.is_empty() {
-        sheets.push(one_surface_sheet(sw, sh, cells));
+    if !front.is_empty() {
+        sheets.push(duplex_sheet(sw, sh, front, back));
     }
     Ok(ImpositionPlan { sheets })
 }
 
-fn one_surface_sheet(w: f64, h: f64, cells: Vec<Cell>) -> PlannedSheet {
+// ------------------------------------------------------------- M2 work styles / duplex back (gang)
+
+/// The work-style **position transform** `T`: where the back cell paired with a front cell at `cell`
+/// lands on the same sheet (SPEC §9). Phase 1 ships only the two gripper-preserving styles; tumble
+/// and perfector are rejected by [`ensure_duplex_work_style`] before reaching here.
+fn work_style_reflect(cell: Rect, ws: WorkStyle, sheet_w: f64) -> Rect {
+    match ws {
+        // Sheetwise: the back is imposed on its own independent grid → same positions as the front.
+        WorkStyle::Sheetwise => cell,
+        // Work-and-turn: reflect about the vertical sheet centreline, gripper on the same edge.
+        WorkStyle::WorkAndTurn => reflect_x(cell, sheet_w / 2.0),
+        // Gated earlier; identity keeps the match total without inventing wrong geometry.
+        WorkStyle::WorkAndTumble | WorkStyle::Perfector => cell,
+    }
+}
+
+/// Phase 1 ships only the gripper-preserving work styles for a duplex gang/N-up back. Tumble and
+/// perfector move the gripper to the opposite/tail edge, which needs the gripper-edge model (M2
+/// Phase 2) for furniture placement and plate validation — so reject them rather than silently emit
+/// misregistered furniture. (Inert for jobs with no `back`: `work_style` only takes effect duplexed.)
+fn ensure_duplex_work_style(ws: WorkStyle) -> Result<()> {
+    match ws {
+        WorkStyle::Sheetwise | WorkStyle::WorkAndTurn => Ok(()),
+        WorkStyle::WorkAndTumble => Err(EngineError::WorkStyleUnsupported("work-and-tumble")),
+        WorkStyle::Perfector => Err(EngineError::WorkStyleUnsupported("perfector")),
+    }
+}
+
+/// Resolve the optional duplex back source: it must be a declared source with the **same page count**
+/// as the front (1:1 pairing). `None` when no back is configured.
+fn resolve_back<'a>(
+    sources: &'a [SourceInfo],
+    back: Option<&BackSpec>,
+    front_pages: usize,
+) -> Result<Option<&'a SourceInfo>> {
+    let Some(spec) = back else {
+        return Ok(None);
+    };
+    let src = sources
+        .iter()
+        .find(|s| s.id == spec.source)
+        .ok_or_else(|| EngineError::UnknownSource(spec.source.clone()))?;
+    if src.pages.len() != front_pages {
+        return Err(EngineError::BackCountMismatch {
+            back: src.id.clone(),
+            back_pages: src.pages.len(),
+            front_pages,
+        });
+    }
+    Ok(Some(src))
+}
+
+/// True when two rects have the same width/height (origin may differ).
+fn same_size(a: Rect, b: Rect) -> bool {
+    const TOL: f64 = 1e-6;
+    (a.width() - b.width()).abs() < TOL && (a.height() - b.height()).abs() < TOL
+}
+
+/// v1 requires each back page's trim **and** bleed to match its paired front page's size, so the cut
+/// registers and the front-derived placement/clip carries to the back unchanged. Reject otherwise.
+fn require_back_geometry(
+    back_id: &str,
+    page: usize,
+    front_trim: Rect,
+    front_bleed: Rect,
+    back_trim: Rect,
+    back_bleed: Rect,
+) -> Result<()> {
+    if same_size(front_trim, back_trim) && same_size(front_bleed, back_bleed) {
+        Ok(())
+    } else {
+        Err(EngineError::BackGeometryMismatch {
+            back: back_id.to_string(),
+            page,
+        })
+    }
+}
+
+/// The back cell's form `/BBox` (back page space): reflect the front cell's clip through the
+/// work-style transform `T`, computed in sheet space and mapped back through the back CTM's inverse.
+/// This is the booklet spine-safe-clip pattern generalised to the gang back, so inner-bleed creep and
+/// asymmetric clips carry over; for `Sheetwise` (identity `T`) it re-expresses the clip in back space.
+fn back_clip(
+    front_ctm: &Matrix,
+    front_clip: Rect,
+    back_ctm: &Matrix,
+    ws: WorkStyle,
+    sheet_w: f64,
+) -> Rect {
+    let sheet = transform_rect_bounds(front_ctm, front_clip);
+    let reflected = work_style_reflect(sheet, ws, sheet_w);
+    transform_rect_bounds(&back_ctm.inverse(), reflected)
+}
+
+/// Emit a sheet with a front surface and, when `back` is non-empty, a reflected back surface.
+fn duplex_sheet(w: f64, h: f64, front: Vec<Cell>, back: Vec<Cell>) -> PlannedSheet {
+    let mut surfaces = vec![Surface {
+        side: SurfaceSide::Front,
+        cells: front,
+        marks: MarkPlan::default(),
+    }];
+    if !back.is_empty() {
+        surfaces.push(Surface {
+            side: SurfaceSide::Back,
+            cells: back,
+            marks: MarkPlan::default(),
+        });
+    }
     PlannedSheet {
         width: w,
         height: h,
-        surfaces: vec![Surface {
-            side: SurfaceSide::Front,
-            cells,
-            marks: MarkPlan::default(),
-        }],
+        surfaces,
     }
 }
 
@@ -546,6 +674,13 @@ fn plan_step_repeat(
     let usable_h = sh - gripper - 2.0 * margin;
     let s = step_scale(sr.scale);
 
+    // Optional duplex back (M2). `work_style` only takes effect when a back is configured.
+    let ws = job.sheet.work_style;
+    let back_src = resolve_back(sources, sr.back.as_ref(), src.pages.len())?;
+    if back_src.is_some() {
+        ensure_duplex_work_style(ws)?;
+    }
+
     let mut sheets = Vec::new();
     for page in 0..src.pages.len() {
         let (trim, bleed, rot, cs) = validate_page(src, page)?;
@@ -605,8 +740,23 @@ fn plan_step_repeat(
         let ox = margin + (usable_w - block_w) / 2.0;
         let oy = gripper + margin + (usable_h - block_h) / 2.0;
 
+        // Resolve the paired back page once per gang (equal geometry ⇒ identical card box & tiling).
+        let back_page = match back_src {
+            Some(bsrc) => {
+                let (bt, bb, brot, bcs) = validate_page(bsrc, page)?;
+                require_back_geometry(&bsrc.id, page, trim, bleed, bt, bb)?;
+                let bcard = match sr.bleed_mode {
+                    BleedMode::Bleed => bb,
+                    BleedMode::NoBleed => bt,
+                };
+                Some((bsrc, bt, bb, brot, bcs, bcard))
+            }
+            None => None,
+        };
+
         let creeping = creep.any();
         let mut cells = Vec::new();
+        let mut back_cells = Vec::new();
         for r in 0..rows {
             for c in 0..cols {
                 let cx = ox + c as f64 * step_w;
@@ -621,10 +771,18 @@ fn plan_step_repeat(
                 } else {
                     card
                 };
+                // Paired back card: place upright into the reflected cell; the clip (incl. creep)
+                // follows the front through the work-style transform into back page space.
+                if let Some((bsrc, bt, bb, brot, bcs, bcard)) = back_page {
+                    let bcell = work_style_reflect(cell, ws, sw);
+                    let bp = place_best(bcard, brot, bcell, sr.scale, false, false);
+                    let bclip = back_clip(&p.ctm, clip, &bp.ctm, ws, sw);
+                    back_cells.push(make_cell(&bsrc.id, page, bp.ctm, bclip, bt, bb, bcs));
+                }
                 cells.push(make_cell(&src.id, page, p.ctm, clip, trim, bleed, cs));
             }
         }
-        sheets.push(one_surface_sheet(sw, sh, cells));
+        sheets.push(duplex_sheet(sw, sh, cells, back_cells));
     }
     Ok(ImpositionPlan { sheets })
 }
@@ -835,6 +993,7 @@ mod tests {
             gutter_pt: 0.0,
             rotate_to_fit: false,
             bleed_mode: BleedMode::NoBleed,
+            back: None,
         })
     }
 
@@ -900,6 +1059,7 @@ mod tests {
             bleed_mode: mode,
             inner_bleed,
             scale: ScaleMode::None,
+            back: None,
         })
     }
 
@@ -1412,5 +1572,199 @@ mod tests {
             p.sheets[0].surfaces[0].cells[0].group_cs,
             GroupCs::DeviceRgb
         );
+    }
+
+    // ---------------------------------------------------- M2 work styles / duplex back (Phase 1)
+
+    /// `body` + `back` sources, identical geometry (so the v1 equal-trim constraint holds).
+    fn src_two(n: usize) -> Vec<SourceInfo> {
+        let mk = |id: &str| SourceInfo {
+            id: id.into(),
+            pages: (0..n)
+                .map(|_| geom(Some(Rect::new(10.0, 10.0, 190.0, 190.0)), 0))
+                .collect(),
+        };
+        vec![mk("body"), mk("back")]
+    }
+
+    fn nup_back(rows: u32, cols: u32, bleed: BleedMode) -> Scheme {
+        Scheme::NUp(NUp {
+            rows,
+            cols,
+            fill: FillOrder::RowMajor,
+            scale: ScaleMode::Fit,
+            gutter_pt: 0.0,
+            rotate_to_fit: false,
+            bleed_mode: bleed,
+            back: Some(BackSpec {
+                source: "back".into(),
+            }),
+        })
+    }
+
+    fn step_repeat_back(mode: BleedMode) -> Scheme {
+        Scheme::StepRepeat(StepRepeat {
+            max_rows: 2,
+            max_cols: 2,
+            h_space_pt: 0.0,
+            v_space_pt: 0.0,
+            bleed_mode: mode,
+            inner_bleed: InnerBleed::Full,
+            scale: ScaleMode::None,
+            back: Some(BackSpec {
+                source: "back".into(),
+            }),
+        })
+    }
+
+    fn det(m: &Matrix) -> f64 {
+        m.a * m.d - m.c * m.b
+    }
+
+    fn rect_approx(a: Rect, b: Rect) {
+        for (x, y) in [
+            (a.llx, b.llx),
+            (a.lly, b.lly),
+            (a.urx, b.urx),
+            (a.ury, b.ury),
+        ] {
+            assert!((x - y).abs() < 1e-9, "rect mismatch: {a:?} vs {b:?}");
+        }
+    }
+
+    fn placed_trim(c: &Cell) -> Rect {
+        crate::geom::transform_rect_bounds(&c.ctm, c.trim)
+    }
+
+    #[test]
+    fn nup_back_sheetwise_places_back_at_same_positions() {
+        // Sheetwise: the back is imposed on its own independent grid → back cell (r,c) sits at the
+        // same sheet position as front cell (r,c). Two surfaces (Front, Back) on one sheet.
+        let p = plan(&job(nup_back(2, 2, BleedMode::NoBleed)), &src_two(4)).unwrap();
+        assert_eq!(p.sheets.len(), 1);
+        let s = &p.sheets[0];
+        assert_eq!(s.surfaces.len(), 2);
+        assert_eq!(s.surfaces[0].side, SurfaceSide::Front);
+        assert_eq!(s.surfaces[1].side, SurfaceSide::Back);
+        assert_eq!(s.surfaces[1].cells.len(), 4);
+        for (f, b) in s.surfaces[0].cells.iter().zip(&s.surfaces[1].cells) {
+            assert_eq!(b.source_id, "back");
+            assert_eq!(placed_trim(f), placed_trim(b));
+        }
+    }
+
+    #[test]
+    fn nup_back_work_and_turn_reflects_positions_and_is_involutive() {
+        // Work-and-turn: back trim = front trim reflected about the vertical centreline (x = W/2),
+        // and reflecting again recovers the front (T∘T = identity).
+        let mut j = job(nup_back(2, 2, BleedMode::NoBleed));
+        j.sheet.work_style = WorkStyle::WorkAndTurn;
+        let axis = j.sheet.size_pt[0] / 2.0;
+        let p = plan(&j, &src_two(4)).unwrap();
+        let s = &p.sheets[0];
+        for (f, b) in s.surfaces[0].cells.iter().zip(&s.surfaces[1].cells) {
+            let fp = placed_trim(f);
+            let bp = placed_trim(b);
+            rect_approx(bp, crate::geom::reflect_x(fp, axis));
+            rect_approx(crate::geom::reflect_x(bp, axis), fp);
+        }
+    }
+
+    #[test]
+    fn gang_back_work_and_turn_reflects_positions() {
+        let mut j = job(step_repeat_back(BleedMode::Bleed));
+        j.sheet.work_style = WorkStyle::WorkAndTurn;
+        let axis = j.sheet.size_pt[0] / 2.0;
+        let p = plan(&j, &src_two(1)).unwrap();
+        let s = &p.sheets[0];
+        assert_eq!(s.surfaces.len(), 2);
+        assert!(!s.surfaces[1].cells.is_empty());
+        for (f, b) in s.surfaces[0].cells.iter().zip(&s.surfaces[1].cells) {
+            rect_approx(placed_trim(b), crate::geom::reflect_x(placed_trim(f), axis));
+        }
+    }
+
+    #[test]
+    fn back_content_ctm_keeps_positive_determinant() {
+        // SPEC §9: positions reflect, content never mirrors → every cell CTM has det > 0.
+        for ws in [WorkStyle::Sheetwise, WorkStyle::WorkAndTurn] {
+            for scheme in [
+                nup_back(2, 2, BleedMode::NoBleed),
+                step_repeat_back(BleedMode::Bleed),
+            ] {
+                let mut j = job(scheme);
+                j.sheet.work_style = ws;
+                let p = plan(&j, &src_two(1)).unwrap();
+                for sheet in &p.sheets {
+                    for surface in &sheet.surfaces {
+                        for cell in &surface.cells {
+                            assert!(det(&cell.ctm) > 0.0, "det must stay positive (no mirror)");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn back_tumble_and_perfector_are_unsupported_in_phase_1() {
+        for ws in [WorkStyle::WorkAndTumble, WorkStyle::Perfector] {
+            let mut j = job(nup_back(2, 2, BleedMode::NoBleed));
+            j.sheet.work_style = ws;
+            assert!(matches!(
+                plan(&j, &src_two(4)).unwrap_err(),
+                EngineError::WorkStyleUnsupported(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn work_style_is_inert_without_a_back() {
+        // A job may set any work style; with no back surface it stays inert (no error, one surface).
+        let mut j = job(nup(1, 1));
+        j.sheet.work_style = WorkStyle::Perfector;
+        let p = plan(&j, &src(1)).unwrap();
+        assert_eq!(p.sheets[0].surfaces.len(), 1);
+    }
+
+    #[test]
+    fn back_count_mismatch_is_rejected() {
+        // front (body) has 4 pages, back has 3 → 1:1 pairing impossible.
+        let mut sources = src_two(4);
+        sources[1].pages.truncate(3);
+        assert!(matches!(
+            plan(&job(nup_back(2, 2, BleedMode::NoBleed)), &sources).unwrap_err(),
+            EngineError::BackCountMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn back_geometry_mismatch_is_rejected() {
+        // back page trim is a different size than the paired front page → cut would not register.
+        let mut sources = src_two(1);
+        sources[1].pages[0] = geom(Some(Rect::new(10.0, 10.0, 150.0, 150.0)), 0);
+        assert!(matches!(
+            plan(&job(nup_back(1, 1, BleedMode::NoBleed)), &sources).unwrap_err(),
+            EngineError::BackGeometryMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn back_source_rotate_is_honored_upright_and_keeps_det_positive() {
+        // A back page with /Rotate=90 (square trim ⇒ equal size) is placed via T: its own rotate is
+        // baked into the CTM (so it prints upright), and det stays positive (rotation, not mirror).
+        let mut sources = src_two(1);
+        sources[1].pages[0] = geom(Some(Rect::new(10.0, 10.0, 190.0, 190.0)), 90);
+        let mut j = job(nup_back(1, 1, BleedMode::NoBleed));
+        j.sheet.work_style = WorkStyle::WorkAndTurn;
+        let p = plan(&j, &sources).unwrap();
+        let back = &p.sheets[0].surfaces[1].cells[0];
+        // 90° rotation → the CTM's `a` component is ~0 (x maps from source y), unlike the unrotated
+        // front, and the determinant is still > 0.
+        assert!(
+            back.ctm.a.abs() < 1e-9,
+            "expected a 90° rotation in the back CTM"
+        );
+        assert!(det(&back.ctm) > 0.0);
     }
 }

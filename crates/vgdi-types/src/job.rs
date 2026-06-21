@@ -82,6 +82,7 @@ mod tests {
                 gutter_pt: 0.0,
                 rotate_to_fit: false,
                 bleed_mode: BleedMode::NoBleed,
+                back: None,
             }),
             sheet: Sheet {
                 size_pt: [595.276, 841.89],

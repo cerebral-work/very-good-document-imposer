@@ -182,6 +182,14 @@ pub fn transform_rect_bounds(m: &Matrix, r: Rect) -> Rect {
     Rect::new(minx, miny, maxx, maxy)
 }
 
+/// Reflect an axis-aligned rect horizontally about the vertical line `x = axis` (sheet space). This
+/// is the work-and-turn **position** transform `T`: it relocates the rect (mirrors its x range) while
+/// the caller re-places page content *upright* into the result — content is never mirrored (SPEC §9,
+/// "never apply a negative-x scale to page content"). Involutive: `reflect_x(reflect_x(r, a), a) == r`.
+pub fn reflect_x(r: Rect, axis: f64) -> Rect {
+    Rect::new(2.0 * axis - r.urx, r.lly, 2.0 * axis - r.llx, r.ury)
+}
+
 /// Axis-aligned bounds of the rectangle `[0,w] x [0,h]` after applying matrix `m`.
 fn corners_bounds(w: f64, h: f64, m: &Matrix) -> (f64, f64, f64, f64) {
     let mut minx = f64::INFINITY;
@@ -417,6 +425,24 @@ mod tests {
         approx(id.c, 0.0);
         approx(id.e, 0.0);
         approx(id.f, 0.0);
+    }
+
+    #[test]
+    fn reflect_x_mirrors_x_keeps_y_and_is_involutive() {
+        let r = Rect::new(10.0, 20.0, 40.0, 60.0);
+        let axis = 100.0;
+        let m = reflect_x(r, axis);
+        // x mirrored about 100: [10,40] -> [160,190]; y untouched.
+        approx(m.llx, 160.0);
+        approx(m.urx, 190.0);
+        approx(m.lly, 20.0);
+        approx(m.ury, 60.0);
+        // Reflecting twice returns the original rect.
+        let back = reflect_x(m, axis);
+        approx(back.llx, r.llx);
+        approx(back.lly, r.lly);
+        approx(back.urx, r.urx);
+        approx(back.ury, r.ury);
     }
 
     #[test]

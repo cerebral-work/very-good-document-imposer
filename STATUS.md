@@ -1,8 +1,8 @@
 # Project Status — Very Good Document Imposer
 
-> Internal engineering handoff (non-user-facing). Snapshot: 2026-06-19.
+> Internal engineering handoff (non-user-facing). Snapshot: 2026-06-21.
 > Read this first when resuming with fresh context. Authoritative design lives in
-> `SPEC.md`, `docs/adr/0001-platform-and-stack.md`, and `docs/m1-design.md`.
+> `SPEC.md`, `docs/adr/0001-platform-and-stack.md`, `docs/m1-design.md`, and `docs/m2-design.md`.
 
 ## What this is
 
@@ -96,7 +96,7 @@ spikes/spike0-qpdf    feasibility gate + `gen-fixture` (authors CMYK/TrimBox fix
     QR/DataMatrix, embedded fonts (PDF/X). Known minor: colour-bar/barcode/slug all default to the
     Slug region → they stack; give them distinct `region`s, or a furniture layout pass is future work.
 
-- **M1.6 (done — on branch `m1.5-emission`, NOT yet merged to `main`; commits 53a1d3b→66d050b):**
+- **M1.6 (done — merged to `main`; commits 53a1d3b→66d050b):**
   Step & Repeat reworked into a "bulletproof" card-sheet gang, cross-checked byte-for-placement
   against **Quite Imposing** (and the booklet path vs QI on *the-metamorphosis.pdf* — exact CTM
   match `1.23 0 0 1.23 …`).
@@ -123,7 +123,7 @@ spikes/spike0-qpdf    feasibility gate + `gen-fixture` (authors CMYK/TrimBox fix
   - `manual-tests/testcard-steprepeat.json` (uses `/Users/ruby/Downloads/testcard.pdf`, 85×55mm card,
     3mm bleed) and `metamorphosis-booklet.json` are the QI reference jobs.
 
-- **M1.7 — inner-bleed "creep" (done — branch `m1.5-emission`, commits 2a32b3d→1ab372b):** the user
+- **M1.7 — inner-bleed "creep" (done — merged to `main`, commits 2a32b3d→1ab372b):** the user
   can tighten the gang by **cropping the shared inner bleed**, gaining rows/cols. Validated to exact
   **QI parity**: the testcard on A3 is `3×6 = 18` full-bleed and `3×7 = 21` at creep-to-half-bleed.
   - **`StepRepeat.inner_bleed: InnerBleed { Full | Fraction(f64) | CombinedPt(f64) }`**, default
@@ -145,11 +145,37 @@ spikes/spike0-qpdf    feasibility gate + `gen-fixture` (authors CMYK/TrimBox fix
     tests (`…asymmetric_bleed_keeps_seam_on_centred_cut`, `inner_creeps_non_finite_falls_back_to_full`).
   - `manual-tests/testcard-steprepeat-creep.json` is the creep reference job (`fraction: 0.5` → 21).
 
-- **NEXT JOB — candidates (pick with owner):** (1) **strict BleedBox-or-trim toggle** (the still-TODO
-  from M1.6: a job flag to disable natural-bleed inference so only an explicit BleedBox counts);
-  (2) **merge `m1.5-emission` → `main`** (M1.5/M1.6/M1.7 are all on this branch, unmerged);
-  (3) a deferred furniture/colour item (see M1.5 "Still deferred": work-style reflections, warnings
-  channel for GWG equal-TrimBox flags, hatched bleed fill, cross-spine bleed, QR/DataMatrix).
+- **M2 work styles — Phase 1 (done, branch `m2-work-styles`, not yet merged).** Design in
+  `docs/m2-design.md` (revised after a 5-lens adversarial workflow review: 16 confirmed findings
+  folded in — re-scoped phases, decided the back-source model, scoped the marks claim, fixed the test
+  oracles). `WorkStyle` now drives a **duplex back surface** on N-up + Step & Repeat (was inert; both
+  paths were front-only via `one_surface_sheet`, now replaced by `duplex_sheet`).
+  - **Scope shipped:** the two gripper-preserving styles **Sheetwise** (back on its own independent
+    grid, same positions) + **WorkAndTurn** (back = front reflected about the vertical centreline).
+    **Tumble/Perfector → `EngineError::WorkStyleUnsupported`** until Phase 2 (they move the gripper →
+    need the gripper-edge model). `work_style` stays **inert unless a `back` is configured** (back-compat).
+  - **Data model:** `StepRepeat.back` / `NUp.back: Option<BackSpec>` (`BackSpec { source }` = a second
+    declared source, 1:1 by fill order). **v1 requires equal trim+bleed geometry** (else
+    `BackGeometryMismatch`) and equal page count (`BackCountMismatch`) — so the front-derived
+    scale/gutter/inner-bleed-creep carries to the back unchanged and the cut registers.
+  - **Mechanism:** `work_style_reflect` (the `T` transform) + `geom::reflect_x`; the back content is
+    placed **upright** via `place_best` into the reflected cell (never a content mirror — invariant
+    **det(CTM) > 0** on every cell, asserted by test). The back clip reflects the front clip through
+    `T` in sheet space and maps back via `Matrix::inverse` (booklet spine-safe-clip generalised → inner
+    creep carries over for free). Cell-derived marks follow the reflected cells automatically.
+  - **Tests (pure, no qpdf):** sheetwise same-positions, W&T reflect + involution, gang reflect,
+    det>0 across styles, tumble/perfector rejected, work-style-inert-without-back, count/geometry
+    mismatch rejections, `/Rotate`-on-back upright+det>0, `reflect_x` involution. **All green: 74
+    engine + 10 integration + 11 types; clippy `--all-features` + fmt clean.**
+  - **NEXT — M2 Phase 2:** `GripperEdge` enum → wire Tumble/Perfector; per-surface gripper-relative
+    furniture (slug/colour-bar/barcode don't mirror today); reject inconsistent work-style/gripper at
+    plan time (warnings/error channel); backend two-surface render + QI byte/CTM parity + manual-tests.
+    Phase 3: booklet `work_style` metadata + leftovers.
+- **Still on the backlog (smaller / infra):** (a) **strict BleedBox-or-trim toggle** (the M1.6 still-
+  TODO: a job flag to disable natural-bleed inference so only an explicit BleedBox counts); (b) the
+  **warnings channel** (GWG equal-TrimBox flags; also wanted by M2 Phase 3); (c) other deferred
+  furniture/colour from M1.5 "Still deferred": hatched bleed fill, cross-spine (reader-spread) bleed,
+  QR/DataMatrix, `Flip` allowance rendering.
 
 ## Build / test / run
 
