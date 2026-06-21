@@ -145,32 +145,39 @@ spikes/spike0-qpdf    feasibility gate + `gen-fixture` (authors CMYK/TrimBox fix
     tests (`…asymmetric_bleed_keeps_seam_on_centred_cut`, `inner_creeps_non_finite_falls_back_to_full`).
   - `manual-tests/testcard-steprepeat-creep.json` is the creep reference job (`fraction: 0.5` → 21).
 
-- **M2 work styles — Phase 1 (done, branch `m2-work-styles`, not yet merged).** Design in
+- **M2 work styles — Phases 1 + 2a (done, branch `m2-work-styles`, not yet merged).** Design in
   `docs/m2-design.md` (revised after a 5-lens adversarial workflow review: 16 confirmed findings
   folded in — re-scoped phases, decided the back-source model, scoped the marks claim, fixed the test
   oracles). `WorkStyle` now drives a **duplex back surface** on N-up + Step & Repeat (was inert; both
   paths were front-only via `one_surface_sheet`, now replaced by `duplex_sheet`).
-  - **Scope shipped:** the two gripper-preserving styles **Sheetwise** (back on its own independent
-    grid, same positions) + **WorkAndTurn** (back = front reflected about the vertical centreline).
-    **Tumble/Perfector → `EngineError::WorkStyleUnsupported`** until Phase 2 (they move the gripper →
-    need the gripper-edge model). `work_style` stays **inert unless a `back` is configured** (back-compat).
+  - **All four styles wired:** **Sheetwise** (back on its own independent grid, same positions),
+    **WorkAndTurn** (reflect about the vertical centreline), **WorkAndTumble** (reflect about the
+    horizontal centreline), **Perfector** (180° about the sheet centre + content rotated 180°). All
+    verified end-to-end through the CLI (`manual-tests/m2-work-styles/`, gs-rendered PNGs).
+    `work_style` stays **inert unless a `back` is configured** (back-compat).
+  - **One known guard (Phase 2b lifts it):** sheet-edge **furniture** (slug/colour-bar/barcode) is
+    pinned to the front gripper edge and doesn't relocate when the work style moves the gripper, so
+    furniture on Tumble/Perfector is rejected (`EngineError::FurnitureOnMovedGripper`). Cell-derived
+    marks (crop/centre/trim/registration) reflect with the cells and are fine on every style.
   - **Data model:** `StepRepeat.back` / `NUp.back: Option<BackSpec>` (`BackSpec { source }` = a second
     declared source, 1:1 by fill order). **v1 requires equal trim+bleed geometry** (else
     `BackGeometryMismatch`) and equal page count (`BackCountMismatch`) — so the front-derived
     scale/gutter/inner-bleed-creep carries to the back unchanged and the cut registers.
-  - **Mechanism:** `work_style_reflect` (the `T` transform) + `geom::reflect_x`; the back content is
-    placed **upright** via `place_best` into the reflected cell (never a content mirror — invariant
-    **det(CTM) > 0** on every cell, asserted by test). The back clip reflects the front clip through
-    `T` in sheet space and maps back via `Matrix::inverse` (booklet spine-safe-clip generalised → inner
-    creep carries over for free). Cell-derived marks follow the reflected cells automatically.
-  - **Tests (pure, no qpdf):** sheetwise same-positions, W&T reflect + involution, gang reflect,
-    det>0 across styles, tumble/perfector rejected, work-style-inert-without-back, count/geometry
-    mismatch rejections, `/Rotate`-on-back upright+det>0, `reflect_x` involution. **All green: 74
-    engine + 10 integration + 11 types; clippy `--all-features` + fmt clean.**
-  - **NEXT — M2 Phase 2:** `GripperEdge` enum → wire Tumble/Perfector; per-surface gripper-relative
-    furniture (slug/colour-bar/barcode don't mirror today); reject inconsistent work-style/gripper at
-    plan time (warnings/error channel); backend two-surface render + QI byte/CTM parity + manual-tests.
-    Phase 3: booklet `work_style` metadata + leftovers.
+  - **Mechanism:** `work_style_reflect` (the `T` position transform) + `geom::reflect_x`/`reflect_y`;
+    back content placed via `place_best` — upright for turn/tumble, `flip180` for perfector — never a
+    content mirror, so **det(CTM) > 0** on every cell (asserted across all four styles). The back clip
+    reflects the front clip through `T` in sheet space and maps back via `Matrix::inverse` (booklet
+    spine-safe-clip generalised → inner creep carries over for free). Cell-derived marks follow the
+    reflected cells automatically.
+  - **Tests (pure, no qpdf):** per-style position reflection (turn/tumble/perfector) + involution,
+    perfector content-180° (`a<0`) + det>0 across all styles, sheetwise same-positions,
+    furniture-on-moved-gripper rejected, work-style-inert-without-back, count/geometry mismatch
+    rejections, `/Rotate`-on-back, `reflect_x`/`reflect_y` involution. **All green: 77 engine + 10
+    integration + 11 types; clippy `--all-features` + fmt clean.**
+  - **NEXT — M2 Phase 2b:** `GripperEdge` enum; thread each surface's effective gripper edge through
+    `attach_marks` → `region_origin`/`slug_text` so furniture relocates for tumble/perfector; lift the
+    2a furniture guard; pulls in the warnings/error channel. Then **2c:** backend QI byte/CTM parity +
+    reference jobs with real distinct front/back art. **Phase 3:** booklet `work_style` metadata.
 - **Still on the backlog (smaller / infra):** (a) **strict BleedBox-or-trim toggle** (the M1.6 still-
   TODO: a job flag to disable natural-bleed inference so only an explicit BleedBox counts); (b) the
   **warnings channel** (GWG equal-TrimBox flags; also wanted by M2 Phase 3); (c) other deferred

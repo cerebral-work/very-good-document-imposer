@@ -1,8 +1,9 @@
 # M2 work styles — manual test
 
-Eyeball the duplex back surface added in M2 Phase 1 (`WorkStyle` driving N-up / Step & Repeat).
-Phase 1 ships the two **gripper-preserving** styles: `sheetwise` and `work-and-turn`. Tumble and
-perfector are rejected until Phase 2.
+Eyeball the duplex back surface that `WorkStyle` drives on N-up / Step & Repeat. All four styles are
+wired: `sheetwise`, `work-and-turn`, `work-and-tumble`, `perfector`. Cell-derived marks (crop, etc.)
+reflect with the cells on every style; **sheet-edge furniture** (slug / colour bar / barcode) on a
+gripper-moving style (tumble / perfector) is still rejected until the gripper-edge model lands.
 
 ## Run
 
@@ -17,17 +18,21 @@ page 1 = front surface, page 2 = back surface.
 
 ## What to look for
 
-- **`nup-work-and-turn`** — the headline. Page 1 (front) fills the 2×2 grid row-major, light → dark.
-  Page 2 (back) is page 1 **mirrored left-to-right**: the columns swap, but each cell's content stays
-  **upright** (the squares aren't flipped — positions reflect, content never mirrors, SPEC §9).
-- **`nup-sheetwise`** — same job, `work_style: sheetwise`. Page 2 (back) sits at the **same positions**
-  as page 1 (its own independent grid, no reflection). Diff it against `nup-work-and-turn` to see what
-  the work style changes.
+Every job's page 1 is the front (2×2 grid, row-major, light → dark); page 2 is the back surface.
+
+- **`nup-work-and-turn`** — back is the front **mirrored left-to-right** (columns swap about the
+  vertical centreline), each cell upright (positions reflect, content never mirrors, SPEC §9).
+- **`nup-sheetwise`** — back sits at the **same positions** as the front (its own independent grid, no
+  reflection). Diff against `nup-work-and-turn` to see what the work style changes.
+- **`nup-tumble`** — back is the front **mirrored top-to-bottom** (about the horizontal centreline),
+  cells upright.
+- **`nup-perfector`** — back is the front **rotated 180°** about the sheet centre: positions reflect on
+  *both* axes and each cell's content is turned 180° (upside-down), unlike turn/tumble.
 - **`gang-work-and-turn`** — a Step & Repeat card gang (2×3, bleed-to-bleed) with a back. Two surfaces,
   back gang reflected. With these identical fixtures the cells are uniform so the mirror isn't visually
   obvious — swap in your own distinct front/back card art (below) to see it.
-- **`nup-tumble`** — expected to **fail** with `work style 'work-and-tumble' not yet supported …`,
-  demonstrating the Phase-1 guard (no silently-wrong output).
+- **`nup-tumble-slug`** — expected to **fail**: tumble + a slug → `sheet-edge furniture … needs the
+  gripper-edge model …`. Cell marks (crop) are fine on tumble/perfector; furniture isn't yet.
 
 ## Use your own art
 

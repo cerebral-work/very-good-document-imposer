@@ -6,7 +6,7 @@
 
 use crate::boxes::PageBoxes;
 use crate::error::{EngineError, Result};
-use crate::geom::{place_best, place_manual, reflect_x, transform_rect_bounds, Matrix};
+use crate::geom::{place_best, place_manual, reflect_x, reflect_y, transform_rect_bounds, Matrix};
 use crate::imposition::{perfect_bound_order, saddle_order};
 use crate::marks::{FoldLine, MarkContext, MarkPlan, PlacedCell, SurfaceLayout, SurfaceMarkInput};
 use vgdi_types::{
@@ -357,7 +357,7 @@ fn plan_nup(job: &JobSpec, sources: &[SourceInfo], n: &NUp) -> Result<Imposition
     let ws = job.sheet.work_style;
     let back_src = resolve_back(sources, n.back.as_ref(), src.pages.len())?;
     if back_src.is_some() {
-        ensure_duplex_work_style(ws)?;
+        ensure_duplex_supported(ws, &job.marks)?;
     }
 
     let mut sheets = Vec::new();
@@ -389,14 +389,22 @@ fn plan_nup(job: &JobSpec, sources: &[SourceInfo], n: &NUp) -> Result<Imposition
             check_bleed_gutter(&p.ctm, trim, bleed, n.gutter_pt)?;
         }
 
-        // Paired back cell: place the back page upright into the work-style-reflected cell. Equal
-        // geometry (validated) ⇒ the bleed gutter already checked on the front holds for the back.
+        // Paired back cell: place the back page into the work-style-reflected cell — upright for
+        // turn/tumble, rotated 180° for perfector (never mirrored). Equal geometry (validated) ⇒ the
+        // bleed gutter already checked on the front holds for the back.
         if let Some(bsrc) = back_src {
             let (bt, bb, brot, bcs) = validate_page(bsrc, page)?;
             require_back_geometry(&bsrc.id, page, trim, bleed, bt, bb)?;
-            let bcell = work_style_reflect(cell, ws, sw);
-            let bp = place_best(bt, brot, bcell, n.scale, n.rotate_to_fit, false);
-            let bclip = back_clip(&p.ctm, clip, &bp.ctm, ws, sw);
+            let bcell = work_style_reflect(cell, ws, sw, sh);
+            let bp = place_best(
+                bt,
+                brot,
+                bcell,
+                n.scale,
+                n.rotate_to_fit,
+                work_style_content_flip(ws),
+            );
+            let bclip = back_clip(&p.ctm, clip, &bp.ctm, ws, sw, sh);
             back.push(make_cell(&bsrc.id, page, bp.ctm, bclip, bt, bb, bcs));
         }
 
@@ -419,29 +427,51 @@ fn plan_nup(job: &JobSpec, sources: &[SourceInfo], n: &NUp) -> Result<Imposition
 // ------------------------------------------------------------- M2 work styles / duplex back (gang)
 
 /// The work-style **position transform** `T`: where the back cell paired with a front cell at `cell`
-/// lands on the same sheet (SPEC §9). Phase 1 ships only the two gripper-preserving styles; tumble
-/// and perfector are rejected by [`ensure_duplex_work_style`] before reaching here.
-fn work_style_reflect(cell: Rect, ws: WorkStyle, sheet_w: f64) -> Rect {
+/// lands on the same sheet (SPEC §9). A *position* reflection only — the back content is placed
+/// upright (turn/tumble) or rotated 180° (perfector, see [`work_style_content_flip`]); content is
+/// never mirrored, so every back CTM keeps det > 0.
+fn work_style_reflect(cell: Rect, ws: WorkStyle, sheet_w: f64, sheet_h: f64) -> Rect {
     match ws {
         // Sheetwise: the back is imposed on its own independent grid → same positions as the front.
         WorkStyle::Sheetwise => cell,
-        // Work-and-turn: reflect about the vertical sheet centreline, gripper on the same edge.
+        // Work-and-turn: reflect about the vertical centreline; gripper stays on the same edge.
         WorkStyle::WorkAndTurn => reflect_x(cell, sheet_w / 2.0),
-        // Gated earlier; identity keeps the match total without inventing wrong geometry.
-        WorkStyle::WorkAndTumble | WorkStyle::Perfector => cell,
+        // Work-and-tumble: reflect about the horizontal centreline; gripper moves to the tail edge.
+        WorkStyle::WorkAndTumble => reflect_y(cell, sheet_h / 2.0),
+        // Perfector: 180° rotation about the sheet centre = reflect both axes; gripper opposite edge.
+        WorkStyle::Perfector => reflect_y(reflect_x(cell, sheet_w / 2.0), sheet_h / 2.0),
     }
 }
 
-/// Phase 1 ships only the gripper-preserving work styles for a duplex gang/N-up back. Tumble and
-/// perfector move the gripper to the opposite/tail edge, which needs the gripper-edge model (M2
-/// Phase 2) for furniture placement and plate validation — so reject them rather than silently emit
-/// misregistered furniture. (Inert for jobs with no `back`: `work_style` only takes effect duplexed.)
-fn ensure_duplex_work_style(ws: WorkStyle) -> Result<()> {
+/// Perfector images the back as the front **rotated 180°** (SPEC §9), so the back *content* flips
+/// 180° as well (still det > 0 — a rotation, not a mirror). Turn/tumble keep content upright.
+fn work_style_content_flip(ws: WorkStyle) -> bool {
+    matches!(ws, WorkStyle::Perfector)
+}
+
+fn work_style_name(ws: WorkStyle) -> &'static str {
     match ws {
-        WorkStyle::Sheetwise | WorkStyle::WorkAndTurn => Ok(()),
-        WorkStyle::WorkAndTumble => Err(EngineError::WorkStyleUnsupported("work-and-tumble")),
-        WorkStyle::Perfector => Err(EngineError::WorkStyleUnsupported("perfector")),
+        WorkStyle::Sheetwise => "sheetwise",
+        WorkStyle::WorkAndTurn => "work-and-turn",
+        WorkStyle::WorkAndTumble => "work-and-tumble",
+        WorkStyle::Perfector => "perfector",
     }
+}
+
+/// All four work styles place cell-derived marks (crop/centre/trim/registration) correctly because
+/// those frame each surface's own reflected cells. **Sheet-edge furniture** (slug / colour bar /
+/// barcode) is still pinned to the front gripper edge and does not relocate when the work style moves
+/// the gripper (tumble/perfector) — so reject *that combination* rather than emit furniture in the
+/// gripper bite. The gripper-edge furniture model (M2 Phase 2b) will lift this. (Inert without a
+/// `back`: `work_style` only takes effect duplexed.)
+fn ensure_duplex_supported(ws: WorkStyle, marks: &vgdi_types::MarkSet) -> Result<()> {
+    let moves_gripper = matches!(ws, WorkStyle::WorkAndTumble | WorkStyle::Perfector);
+    let edge_furniture =
+        marks.slug.is_some() || marks.color_bar.is_some() || marks.job_barcode.is_some();
+    if moves_gripper && edge_furniture {
+        return Err(EngineError::FurnitureOnMovedGripper(work_style_name(ws)));
+    }
+    Ok(())
 }
 
 /// Resolve the optional duplex back source: it must be a declared source with the **same page count**
@@ -504,9 +534,10 @@ fn back_clip(
     back_ctm: &Matrix,
     ws: WorkStyle,
     sheet_w: f64,
+    sheet_h: f64,
 ) -> Rect {
     let sheet = transform_rect_bounds(front_ctm, front_clip);
-    let reflected = work_style_reflect(sheet, ws, sheet_w);
+    let reflected = work_style_reflect(sheet, ws, sheet_w, sheet_h);
     transform_rect_bounds(&back_ctm.inverse(), reflected)
 }
 
@@ -678,7 +709,7 @@ fn plan_step_repeat(
     let ws = job.sheet.work_style;
     let back_src = resolve_back(sources, sr.back.as_ref(), src.pages.len())?;
     if back_src.is_some() {
-        ensure_duplex_work_style(ws)?;
+        ensure_duplex_supported(ws, &job.marks)?;
     }
 
     let mut sheets = Vec::new();
@@ -771,12 +802,19 @@ fn plan_step_repeat(
                 } else {
                     card
                 };
-                // Paired back card: place upright into the reflected cell; the clip (incl. creep)
-                // follows the front through the work-style transform into back page space.
+                // Paired back card: place into the reflected cell (upright for turn/tumble, 180° for
+                // perfector); the clip (incl. creep) follows the front through `T` into back page space.
                 if let Some((bsrc, bt, bb, brot, bcs, bcard)) = back_page {
-                    let bcell = work_style_reflect(cell, ws, sw);
-                    let bp = place_best(bcard, brot, bcell, sr.scale, false, false);
-                    let bclip = back_clip(&p.ctm, clip, &bp.ctm, ws, sw);
+                    let bcell = work_style_reflect(cell, ws, sw, sh);
+                    let bp = place_best(
+                        bcard,
+                        brot,
+                        bcell,
+                        sr.scale,
+                        false,
+                        work_style_content_flip(ws),
+                    );
+                    let bclip = back_clip(&p.ctm, clip, &bp.ctm, ws, sw, sh);
                     back_cells.push(make_cell(&bsrc.id, page, bp.ctm, bclip, bt, bb, bcs));
                 }
                 cells.push(make_cell(&src.id, page, p.ctm, clip, trim, bleed, cs));
@@ -1686,8 +1724,14 @@ mod tests {
 
     #[test]
     fn back_content_ctm_keeps_positive_determinant() {
-        // SPEC §9: positions reflect, content never mirrors → every cell CTM has det > 0.
-        for ws in [WorkStyle::Sheetwise, WorkStyle::WorkAndTurn] {
+        // SPEC §9: positions reflect (and perfector rotates 180°), content never mirrors → every
+        // cell CTM has det > 0 for all four work styles.
+        for ws in [
+            WorkStyle::Sheetwise,
+            WorkStyle::WorkAndTurn,
+            WorkStyle::WorkAndTumble,
+            WorkStyle::Perfector,
+        ] {
             for scheme in [
                 nup_back(2, 2, BleedMode::NoBleed),
                 step_repeat_back(BleedMode::Bleed),
@@ -1707,15 +1751,59 @@ mod tests {
     }
 
     #[test]
-    fn back_tumble_and_perfector_are_unsupported_in_phase_1() {
-        for ws in [WorkStyle::WorkAndTumble, WorkStyle::Perfector] {
-            let mut j = job(nup_back(2, 2, BleedMode::NoBleed));
-            j.sheet.work_style = ws;
-            assert!(matches!(
-                plan(&j, &src_two(4)).unwrap_err(),
-                EngineError::WorkStyleUnsupported(_)
-            ));
+    fn nup_back_work_and_tumble_reflects_about_horizontal_centreline() {
+        let mut j = job(nup_back(2, 2, BleedMode::NoBleed));
+        j.sheet.work_style = WorkStyle::WorkAndTumble;
+        let axis = j.sheet.size_pt[1] / 2.0;
+        let p = plan(&j, &src_two(4)).unwrap();
+        let s = &p.sheets[0];
+        for (f, b) in s.surfaces[0].cells.iter().zip(&s.surfaces[1].cells) {
+            rect_approx(placed_trim(b), crate::geom::reflect_y(placed_trim(f), axis));
         }
+    }
+
+    #[test]
+    fn nup_back_perfector_rotates_180_in_position_and_content() {
+        let mut j = job(nup_back(2, 2, BleedMode::NoBleed));
+        j.sheet.work_style = WorkStyle::Perfector;
+        let (wax, hax) = (j.sheet.size_pt[0] / 2.0, j.sheet.size_pt[1] / 2.0);
+        let p = plan(&j, &src_two(4)).unwrap();
+        let s = &p.sheets[0];
+        for (f, b) in s.surfaces[0].cells.iter().zip(&s.surfaces[1].cells) {
+            // Position: 180° about the sheet centre = reflect both axes.
+            let want = crate::geom::reflect_y(crate::geom::reflect_x(placed_trim(f), wax), hax);
+            rect_approx(placed_trim(b), want);
+            // Content: rotated 180° (CTM `a` < 0) — a rotation, so det stays > 0.
+            assert!(b.ctm.a < 0.0, "perfector back content is rotated 180°");
+            assert!(det(&b.ctm) > 0.0);
+        }
+    }
+
+    #[test]
+    fn furniture_on_moved_gripper_is_rejected() {
+        // Cell marks are fine on any style, but sheet-edge furniture on tumble/perfector is rejected
+        // until the gripper-edge model lands (no furniture in the gripper bite).
+        let mut j = job(nup_back(2, 2, BleedMode::NoBleed));
+        j.sheet.work_style = WorkStyle::WorkAndTumble;
+        j.marks.slug = Some(Slug::default());
+        assert!(matches!(
+            plan(&j, &src_two(4)).unwrap_err(),
+            EngineError::FurnitureOnMovedGripper(_)
+        ));
+
+        let mut j = job(nup_back(2, 2, BleedMode::NoBleed));
+        j.sheet.work_style = WorkStyle::Perfector;
+        j.marks.color_bar = Some(ColorBar::default());
+        assert!(matches!(
+            plan(&j, &src_two(4)).unwrap_err(),
+            EngineError::FurnitureOnMovedGripper(_)
+        ));
+
+        // Same tumble job with only crop marks (cell-derived) is accepted.
+        let mut j = job(nup_back(2, 2, BleedMode::NoBleed));
+        j.sheet.work_style = WorkStyle::WorkAndTumble;
+        j.marks.crop = Some(CropMarks::default());
+        assert!(plan(&j, &src_two(4)).is_ok());
     }
 
     #[test]

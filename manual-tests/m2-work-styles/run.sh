@@ -29,18 +29,19 @@ cargo run -q -p spike0-qpdf --bin gen-fixture -- "$OUT/back.pdf"  4 bleed
 
 render() { gs -q -dBATCH -dNOPAUSE -sDEVICE=png16m -r96 -o "$OUT/$1-%d.png" "$OUT/$1.pdf"; }
 
-for job in nup-sheetwise nup-work-and-turn gang-work-and-turn; do
+for job in nup-sheetwise nup-work-and-turn nup-tumble nup-perfector gang-work-and-turn; do
   echo "==> imposing $job  (page 1 = front surface, page 2 = back surface)"
   cargo run -q -p vgdi-cli -- "$HERE/$job.json" -o "$OUT/$job.pdf"
   command -v gs >/dev/null && render "$job"
 done
 
-# Phase 1 ships only the gripper-preserving styles; tumble/perfector are rejected (not silent).
-echo "==> imposing nup-tumble  (EXPECTED to fail — tumble is Phase 2)"
-if cargo run -q -p vgdi-cli -- "$HERE/nup-tumble.json" -o "$OUT/nup-tumble.pdf" 2>"$OUT/tumble.err"; then
+# Cell-derived marks (crop) reflect correctly on every style. Sheet-edge furniture (slug/colour-bar/
+# barcode) on a gripper-moving style (tumble/perfector) is rejected until the gripper-edge model lands.
+echo "==> imposing nup-tumble-slug  (EXPECTED to fail — furniture on a moved gripper)"
+if cargo run -q -p vgdi-cli -- "$HERE/nup-tumble-slug.json" -o "$OUT/nup-tumble-slug.pdf" 2>"$OUT/furniture.err"; then
   echo "   !! unexpected success"
 else
-  echo "   rejected as designed: $(cat "$OUT/tumble.err")"
+  echo "   rejected as designed: $(cat "$OUT/furniture.err")"
 fi
 
 echo

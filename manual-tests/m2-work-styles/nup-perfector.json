@@ -1,0 +1,20 @@
+{
+  "schema": "vgdi/jobspec@1",
+  "sources": [
+    { "id": "body", "path": "manual-tests/out/m2/front.pdf" },
+    { "id": "back", "path": "manual-tests/out/m2/back.pdf" }
+  ],
+  "scheme": {
+    "kind": "n-up",
+    "rows": 2,
+    "cols": 2,
+    "fill": "row-major",
+    "scale": "fit",
+    "gutter_pt": 0.0,
+    "bleed_mode": "no-bleed",
+    "back": { "source": "back" }
+  },
+  "sheet": { "size_pt": [800, 800], "gripper_pt": 0.0, "margin_pt": 20.0, "work_style": "perfector" },
+  "marks": { "crop": {} },
+  "output": { "pdf_version": "1.6" }
+}

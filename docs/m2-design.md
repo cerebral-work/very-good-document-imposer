@@ -162,17 +162,23 @@ Reflections and the 180° rotation are exact arithmetic routed through `geom::fm
 Re-scoped after adversarial review: tumble/perfector need the gripper-edge model (furniture + plate
 representability), so they move out of Phase 1.
 
-- **Phase 1 — gripper-preserving styles, model + pure transforms, no backend.** Implement only
-  **`Sheetwise` + `WorkAndTurn`** (both keep the gripper on the same edge). Add `back: Option<BackSpec>`
-  (second-source-id) to `NUp`/`StepRepeat`; the pairing + equal-trim-geometry validation;
-  `back_placement` (reflection for W&T, independent grid for sheetwise) → `two_surface_sheet`;
-  `rotate_to_fit` resolved once. Pure tests: positional reflection, `det > 0`, involution,
-  sheetwise-independent-back, `/Rotate`-on-back, mismatch errors. **`WorkAndTumble`/`Perfector` return
-  an `EngineError("not yet supported")` until Phase 2** (no silent wrong output). TDD, no qpdf.
-- **Phase 2 — gripper-edge model + tumble/perfector + backend emission.** Add the `GripperEdge` enum;
-  wire tumble/perfector; per-surface gripper-relative furniture placement; reject inconsistent
-  work-style/gripper combos at plan time (pulls in the **warnings/error channel**, also wanted by GWG
-  equal-TrimBox flagging). Two-surface sheets render; QI byte/CTM parity; `manual-tests` jobs.
+- **Phase 1 (done) — gripper-preserving styles, pure transforms.** `Sheetwise` + `WorkAndTurn`;
+  `back: Option<BackSpec>` (second-source-id) on `NUp`/`StepRepeat`; pairing + equal-trim-geometry
+  validation; `back_placement` (reflection for W&T, independent grid for sheetwise) →
+  `duplex_sheet`; `rotate_to_fit` resolved once. Pure tests: positional reflection, `det > 0`,
+  involution, sheetwise-independent-back, `/Rotate`-on-back, mismatch errors.
+- **Phase 2a (done) — tumble + perfector position transforms.** `WorkAndTumble` (reflect about the
+  horizontal centreline) and `Perfector` (180° about the sheet centre, content rotated 180° via
+  `place_best(flip180)`, still `det > 0`). Cell-derived marks (crop/centre/trim/registration) reflect
+  with the cells. **Sheet-edge furniture** (slug/colour-bar/barcode) on a gripper-moving style is
+  **rejected** (`FurnitureOnMovedGripper`) — no silent furniture in the gripper bite. Pure tests cover
+  both transforms + the guard; all four styles verified end-to-end through the CLI (`manual-tests`).
+- **Phase 2b — gripper-edge furniture model.** Add the `GripperEdge` enum; thread each surface's
+  effective gripper edge (front = sheet config, back = work-style-derived) through `attach_marks` →
+  `region_origin`/`slug_text` so furniture relocates for tumble/perfector; then lift the 2a guard.
+  Pulls in the **warnings/error channel** (also wanted by GWG equal-TrimBox flagging).
+- **Phase 2c — backend QI parity + reference jobs.** Two-surface byte/CTM parity vs Quite Imposing;
+  `manual-tests` reference jobs with real distinct front/back art.
 - **Phase 3 — booklet work_style metadata + leftovers.** Make `work_style` meaningful on the booklet
   paths (mostly metadata, since a symmetric 2-up turn ≡ sheetwise plate); any deferred furniture/colour.
 

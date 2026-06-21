@@ -190,6 +190,13 @@ pub fn reflect_x(r: Rect, axis: f64) -> Rect {
     Rect::new(2.0 * axis - r.urx, r.lly, 2.0 * axis - r.llx, r.ury)
 }
 
+/// Reflect an axis-aligned rect vertically about the horizontal line `y = axis` (sheet space) — the
+/// work-and-tumble **position** transform `T` (mirrors the rect's y range, x untouched). Same
+/// content-stays-upright contract as [`reflect_x`]. Involutive.
+pub fn reflect_y(r: Rect, axis: f64) -> Rect {
+    Rect::new(r.llx, 2.0 * axis - r.ury, r.urx, 2.0 * axis - r.lly)
+}
+
 /// Axis-aligned bounds of the rectangle `[0,w] x [0,h]` after applying matrix `m`.
 fn corners_bounds(w: f64, h: f64, m: &Matrix) -> (f64, f64, f64, f64) {
     let mut minx = f64::INFINITY;
@@ -439,6 +446,23 @@ mod tests {
         approx(m.ury, 60.0);
         // Reflecting twice returns the original rect.
         let back = reflect_x(m, axis);
+        approx(back.llx, r.llx);
+        approx(back.lly, r.lly);
+        approx(back.urx, r.urx);
+        approx(back.ury, r.ury);
+    }
+
+    #[test]
+    fn reflect_y_mirrors_y_keeps_x_and_is_involutive() {
+        let r = Rect::new(10.0, 20.0, 40.0, 60.0);
+        let axis = 100.0;
+        let m = reflect_y(r, axis);
+        // y mirrored about 100: [20,60] -> [140,180]; x untouched.
+        approx(m.lly, 140.0);
+        approx(m.ury, 180.0);
+        approx(m.llx, 10.0);
+        approx(m.urx, 40.0);
+        let back = reflect_y(m, axis);
         approx(back.llx, r.llx);
         approx(back.lly, r.lly);
         approx(back.urx, r.urx);
