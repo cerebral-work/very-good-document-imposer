@@ -29,19 +29,18 @@ cargo run -q -p spike0-qpdf --bin gen-fixture -- "$OUT/back.pdf"  4 bleed
 
 render() { gs -q -dBATCH -dNOPAUSE -sDEVICE=png16m -r96 -o "$OUT/$1-%d.png" "$OUT/$1.pdf"; }
 
-for job in nup-sheetwise nup-work-and-turn nup-tumble nup-perfector gang-work-and-turn; do
+for job in nup-sheetwise nup-work-and-turn nup-tumble nup-perfector nup-tumble-slug gang-work-and-turn; do
   echo "==> imposing $job  (page 1 = front surface, page 2 = back surface)"
   cargo run -q -p vgdi-cli -- "$HERE/$job.json" -o "$OUT/$job.pdf"
   command -v gs >/dev/null && render "$job"
 done
 
-# Cell-derived marks (crop) reflect correctly on every style. Sheet-edge furniture (slug/colour-bar/
-# barcode) on a gripper-moving style (tumble/perfector) is rejected until the gripper-edge model lands.
-echo "==> imposing nup-tumble-slug  (EXPECTED to fail — furniture on a moved gripper)"
-if cargo run -q -p vgdi-cli -- "$HERE/nup-tumble-slug.json" -o "$OUT/nup-tumble-slug.pdf" 2>"$OUT/furniture.err"; then
+# An undeclared back source is rejected at plan time (also covers count/geometry-mismatch guards).
+echo "==> imposing nup-bad-back  (EXPECTED to fail — back references an unknown source)"
+if cargo run -q -p vgdi-cli -- "$HERE/nup-bad-back.json" -o "$OUT/nup-bad-back.pdf" 2>"$OUT/badback.err"; then
   echo "   !! unexpected success"
 else
-  echo "   rejected as designed: $(cat "$OUT/furniture.err")"
+  echo "   rejected as designed: $(cat "$OUT/badback.err")"
 fi
 
 echo

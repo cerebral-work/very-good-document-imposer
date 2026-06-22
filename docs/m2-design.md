@@ -121,11 +121,12 @@ Two families, two behaviours:
   is exactly what "punch through" requires. (The earlier "back target at `T(x,y)` per point" framing
   was imprecise: registration is emitted once on the union extent, not per target.)
 - **Sheet-edge furniture** (slug, colour bar, barcode) is *not* cell-derived — `region_origin` /
-  `slug_text` pin it to fixed sheet corners relative to `gripper`, with no surface-side argument. It
-  does **not** mirror or relocate with `T`. For Phase 1's two gripper-preserving styles this is
-  correct (the gripper edge is constant front↔back, so furniture legitimately stays put). Defining a
-  per-surface, gripper-relative furniture rule for tumble/perfector is **Phase 2** work (it rides on
-  the gripper-edge enum).
+  `slug_text` anchor it relative to the surface's **gripper edge**. `SurfaceMarkInput.gripper_edge`
+  (`Bottom`/`Top`) carries that per surface: front (and sheetwise / work-and-turn backs) keep `Bottom`;
+  tumble / perfector move the back's gripper to the tail, so its furniture is computed in the canonical
+  gripper-at-bottom frame and then **reflected to the top edge** (`reflect_furniture_to_top`: rects
+  mirrored about the sheet centre, slug text origin `y ↦ h − y − size` with glyphs kept upright). So
+  furniture never lands in the gripper bite, on any style. *(Phase 2b — done.)*
 
 ## Determinism
 
@@ -173,10 +174,12 @@ representability), so they move out of Phase 1.
   with the cells. **Sheet-edge furniture** (slug/colour-bar/barcode) on a gripper-moving style is
   **rejected** (`FurnitureOnMovedGripper`) — no silent furniture in the gripper bite. Pure tests cover
   both transforms + the guard; all four styles verified end-to-end through the CLI (`manual-tests`).
-- **Phase 2b — gripper-edge furniture model.** Add the `GripperEdge` enum; thread each surface's
-  effective gripper edge (front = sheet config, back = work-style-derived) through `attach_marks` →
-  `region_origin`/`slug_text` so furniture relocates for tumble/perfector; then lift the 2a guard.
-  Pulls in the **warnings/error channel** (also wanted by GWG equal-TrimBox flagging).
+- **Phase 2b (done) — gripper-edge furniture model.** `GripperEdge {Bottom,Top}` on
+  `SurfaceMarkInput`; `attach_marks` derives each surface's edge (back of a gang/N-up tumble/perfector
+  job → `Top`); furniture is reflected to that edge (`reflect_furniture_to_top`), glyphs upright. The
+  2a `FurnitureOnMovedGripper` guard is **lifted** — all four styles take any mark set. (A
+  *user-configurable* sheet gripper edge + `grid_cell_rect` generalisation to Left/Right is future, not
+  needed by work styles, which only move bottom↔top.)
 - **Phase 2c — backend QI parity + reference jobs.** Two-surface byte/CTM parity vs Quite Imposing;
   `manual-tests` reference jobs with real distinct front/back art.
 - **Phase 3 — booklet work_style metadata + leftovers.** Make `work_style` meaningful on the booklet

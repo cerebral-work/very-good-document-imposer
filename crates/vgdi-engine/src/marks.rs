@@ -105,6 +105,17 @@ pub enum SurfaceLayout {
     Gang,
 }
 
+/// Which sheet edge holds the press gripper for *this surface*. Sheet-edge furniture (slug, colour
+/// bar, barcode) is parked just inside this edge. The front — and the back under sheetwise /
+/// work-and-turn — keeps the base `Bottom` edge; work-and-tumble / perfector move the gripper to the
+/// opposite edge on the back surface, so its furniture relocates with it (SPEC §9). Cell-derived
+/// marks need no edge: they reflect with the cells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GripperEdge {
+    Bottom,
+    Top,
+}
+
 /// All inputs needed to plan one surface's marks.
 pub struct SurfaceMarkInput<'a> {
     pub cells: &'a [PlacedCell],
@@ -112,6 +123,8 @@ pub struct SurfaceMarkInput<'a> {
     /// The sheet media rectangle, `(0, 0, w, h)`.
     pub sheet: Rect,
     pub gripper: f64,
+    /// The gripper edge for this surface — where sheet-edge furniture parks.
+    pub gripper_edge: GripperEdge,
     pub layout: SurfaceLayout,
     pub marks: &'a MarkSet,
     pub ctx: MarkContext<'a>,
@@ -270,24 +283,47 @@ pub fn plan_surface_marks(input: &SurfaceMarkInput) -> MarkPlan {
         }
     }
 
-    // 5. Colour bar — process solids / tint ramp in a sheet-edge region.
+    // 5-7. Sheet-edge furniture (colour bar, barcode, slug). Computed in the canonical gripper-at-
+    // bottom frame, then — for a surface whose gripper moved to the top (tumble/perfector back) —
+    // reflected to the top edge so it parks just inside the gripper, never in the gripper bite. (Cell
+    // marks above already reflected with the cells; furniture is sheet-anchored, so it's done here.)
+    let mut furn = Vec::new();
+    let mut furn_text = Vec::new();
     if let Some(cb) = &marks.color_bar {
-        primitives.extend(color_bar(cb, input.sheet, input.gripper));
+        furn.extend(color_bar(cb, input.sheet, input.gripper));
     }
-
-    // 6. Job barcode — Code 128 bars in a sheet-edge region.
     if let Some(bc) = &marks.job_barcode {
-        primitives.extend(barcode_marks(bc, input.sheet, input.gripper));
+        furn.extend(barcode_marks(bc, input.sheet, input.gripper));
     }
-
-    // 7. Slug — resolved info tokens as a text run.
     if let Some(slug) = &marks.slug {
         if let Some(t) = slug_text(slug, input.sheet, input.gripper, &input.ctx) {
-            texts.push(t);
+            furn_text.push(t);
         }
     }
+    if input.gripper_edge == GripperEdge::Top {
+        reflect_furniture_to_top(&mut furn, &mut furn_text, input.sheet);
+    }
+    primitives.extend(furn);
+    texts.extend(furn_text);
 
     MarkPlan { primitives, texts }
+}
+
+/// Reflect sheet-edge furniture about the sheet's horizontal centreline, keeping text glyphs upright.
+/// Used when the surface's gripper is on the top edge (tumble/perfector back): furniture computed in
+/// the canonical gripper-at-bottom frame is mirrored to sit just inside the top edge instead. Only
+/// furniture primitives (filled rects) and slug text are passed in — cell-derived marks are not.
+fn reflect_furniture_to_top(prims: &mut [MarkPrimitive], texts: &mut [MarkText], sheet: Rect) {
+    let flip = sheet.lly + sheet.ury; // reflect about y = (lly+ury)/2: y ↦ flip − y
+    for p in prims.iter_mut() {
+        if let MarkPrimitive::FillRect { rect, .. } = p {
+            *rect = Rect::new(rect.llx, flip - rect.ury, rect.urx, flip - rect.lly);
+        }
+    }
+    for t in texts.iter_mut() {
+        // Mirror the text block [y, y+size] but keep glyphs upright → new origin = flip − y − size.
+        t.y = flip - t.y - t.size;
+    }
 }
 
 /// Union of a set of rectangles (the imposed content extent).
@@ -857,6 +893,7 @@ mod tests {
             fold_lines: folds,
             sheet: Rect::new(0.0, 0.0, 600.0, 500.0),
             gripper: 0.0,
+            gripper_edge: GripperEdge::Bottom,
             layout: SurfaceLayout::Independent,
             marks,
             ctx,

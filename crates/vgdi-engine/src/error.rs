@@ -32,11 +32,6 @@ pub enum EngineError {
 
     // --- M2 work styles / duplex back ---
     #[error(
-        "sheet-edge furniture (slug/colour-bar/barcode) on work style `{0}` needs the gripper-edge model (M2 phase 2b); cell marks like crop/registration are fine"
-    )]
-    FurnitureOnMovedGripper(&'static str),
-
-    #[error(
         "back source `{back}` has {back_pages} page(s) but the front needs {front_pages} (1:1 pairing)"
     )]
     BackCountMismatch {

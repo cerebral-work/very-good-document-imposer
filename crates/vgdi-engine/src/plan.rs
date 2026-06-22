@@ -8,7 +8,9 @@ use crate::boxes::PageBoxes;
 use crate::error::{EngineError, Result};
 use crate::geom::{place_best, place_manual, reflect_x, reflect_y, transform_rect_bounds, Matrix};
 use crate::imposition::{perfect_bound_order, saddle_order};
-use crate::marks::{FoldLine, MarkContext, MarkPlan, PlacedCell, SurfaceLayout, SurfaceMarkInput};
+use crate::marks::{
+    FoldLine, GripperEdge, MarkContext, MarkPlan, PlacedCell, SurfaceLayout, SurfaceMarkInput,
+};
 use vgdi_types::{
     BackSpec, BleedMode, Duplex, FillOrder, InnerBleed, JobSpec, Manual, NUp, PerfectBound, Rect,
     ScaleMode, Scheme, StepRepeat, SurfaceSide, WorkStyle, SCHEMA_ID,
@@ -170,6 +172,10 @@ fn attach_marks(plan: &mut ImpositionPlan, job: &JobSpec) {
     // Collation back-step marks order *gathered* signatures, so they apply to perfect binding only —
     // a saddle-stitch booklet is a single nested signature with nothing to collate.
     let per_sig = sheets_per_signature(job);
+    // `work_style` drives a back surface only on the gang/N-up paths; on tumble/perfector it moves the
+    // gripper to the opposite edge, so that back surface's furniture parks at the top.
+    let ws = job.sheet.work_style;
+    let work_style_drives = matches!(job.scheme, Scheme::NUp(_) | Scheme::StepRepeat(_));
 
     for (sheet_idx, sheet) in plan.sheets.iter_mut().enumerate() {
         let sheet_rect = Rect::new(0.0, 0.0, sheet.width, sheet.height);
@@ -188,11 +194,20 @@ fn attach_marks(plan: &mut ImpositionPlan, job: &JobSpec) {
             } else {
                 Vec::new()
             };
+            let gripper_edge = if work_style_drives
+                && surface.side == SurfaceSide::Back
+                && matches!(ws, WorkStyle::WorkAndTumble | WorkStyle::Perfector)
+            {
+                GripperEdge::Top
+            } else {
+                GripperEdge::Bottom
+            };
             let input = SurfaceMarkInput {
                 cells: &placed,
                 fold_lines: &fold_lines,
                 sheet: sheet_rect,
                 gripper: job.sheet.gripper_pt,
+                gripper_edge,
                 layout,
                 marks: &job.marks,
                 ctx: MarkContext {
@@ -356,9 +371,6 @@ fn plan_nup(job: &JobSpec, sources: &[SourceInfo], n: &NUp) -> Result<Imposition
     // Optional duplex back (M2). `work_style` only takes effect when a back is configured.
     let ws = job.sheet.work_style;
     let back_src = resolve_back(sources, n.back.as_ref(), src.pages.len())?;
-    if back_src.is_some() {
-        ensure_duplex_supported(ws, &job.marks)?;
-    }
 
     let mut sheets = Vec::new();
     let mut front = Vec::new();
@@ -447,31 +459,6 @@ fn work_style_reflect(cell: Rect, ws: WorkStyle, sheet_w: f64, sheet_h: f64) -> 
 /// 180° as well (still det > 0 — a rotation, not a mirror). Turn/tumble keep content upright.
 fn work_style_content_flip(ws: WorkStyle) -> bool {
     matches!(ws, WorkStyle::Perfector)
-}
-
-fn work_style_name(ws: WorkStyle) -> &'static str {
-    match ws {
-        WorkStyle::Sheetwise => "sheetwise",
-        WorkStyle::WorkAndTurn => "work-and-turn",
-        WorkStyle::WorkAndTumble => "work-and-tumble",
-        WorkStyle::Perfector => "perfector",
-    }
-}
-
-/// All four work styles place cell-derived marks (crop/centre/trim/registration) correctly because
-/// those frame each surface's own reflected cells. **Sheet-edge furniture** (slug / colour bar /
-/// barcode) is still pinned to the front gripper edge and does not relocate when the work style moves
-/// the gripper (tumble/perfector) — so reject *that combination* rather than emit furniture in the
-/// gripper bite. The gripper-edge furniture model (M2 Phase 2b) will lift this. (Inert without a
-/// `back`: `work_style` only takes effect duplexed.)
-fn ensure_duplex_supported(ws: WorkStyle, marks: &vgdi_types::MarkSet) -> Result<()> {
-    let moves_gripper = matches!(ws, WorkStyle::WorkAndTumble | WorkStyle::Perfector);
-    let edge_furniture =
-        marks.slug.is_some() || marks.color_bar.is_some() || marks.job_barcode.is_some();
-    if moves_gripper && edge_furniture {
-        return Err(EngineError::FurnitureOnMovedGripper(work_style_name(ws)));
-    }
-    Ok(())
 }
 
 /// Resolve the optional duplex back source: it must be a declared source with the **same page count**
@@ -708,9 +695,6 @@ fn plan_step_repeat(
     // Optional duplex back (M2). `work_style` only takes effect when a back is configured.
     let ws = job.sheet.work_style;
     let back_src = resolve_back(sources, sr.back.as_ref(), src.pages.len())?;
-    if back_src.is_some() {
-        ensure_duplex_supported(ws, &job.marks)?;
-    }
 
     let mut sheets = Vec::new();
     for page in 0..src.pages.len() {
@@ -1780,30 +1764,39 @@ mod tests {
     }
 
     #[test]
-    fn furniture_on_moved_gripper_is_rejected() {
-        // Cell marks are fine on any style, but sheet-edge furniture on tumble/perfector is rejected
-        // until the gripper-edge model lands (no furniture in the gripper bite).
+    fn moved_gripper_back_furniture_relocates_to_the_top_edge() {
+        // Slug defaults to BottomLeft. On a gripper-moving back (tumble/perfector) the gripper is at
+        // the tail, so the back's slug relocates to the top edge; on the front (and turn/sheetwise
+        // backs, gripper unchanged) it stays at the bottom. Glyphs stay upright either way.
+        for ws in [WorkStyle::WorkAndTumble, WorkStyle::Perfector] {
+            let mut j = job(nup_back(2, 2, BleedMode::NoBleed));
+            j.sheet.work_style = ws;
+            j.marks.slug = Some(Slug::default());
+            let p = plan(&j, &src_two(4)).unwrap();
+            let h = p.sheets[0].height;
+            let front = &p.sheets[0].surfaces[0].marks.texts;
+            let back = &p.sheets[0].surfaces[1].marks.texts;
+            assert!(
+                !front.is_empty() && !back.is_empty(),
+                "slug emitted on both surfaces"
+            );
+            assert!(
+                front[0].y < h / 2.0,
+                "front slug parks at the bottom (gripper) edge"
+            );
+            assert!(
+                back[0].y > h / 2.0,
+                "{ws:?} back slug relocates to the moved gripper edge"
+            );
+        }
+
+        // Work-and-turn keeps the gripper on the same edge → the back slug stays at the bottom.
         let mut j = job(nup_back(2, 2, BleedMode::NoBleed));
-        j.sheet.work_style = WorkStyle::WorkAndTumble;
+        j.sheet.work_style = WorkStyle::WorkAndTurn;
         j.marks.slug = Some(Slug::default());
-        assert!(matches!(
-            plan(&j, &src_two(4)).unwrap_err(),
-            EngineError::FurnitureOnMovedGripper(_)
-        ));
-
-        let mut j = job(nup_back(2, 2, BleedMode::NoBleed));
-        j.sheet.work_style = WorkStyle::Perfector;
-        j.marks.color_bar = Some(ColorBar::default());
-        assert!(matches!(
-            plan(&j, &src_two(4)).unwrap_err(),
-            EngineError::FurnitureOnMovedGripper(_)
-        ));
-
-        // Same tumble job with only crop marks (cell-derived) is accepted.
-        let mut j = job(nup_back(2, 2, BleedMode::NoBleed));
-        j.sheet.work_style = WorkStyle::WorkAndTumble;
-        j.marks.crop = Some(CropMarks::default());
-        assert!(plan(&j, &src_two(4)).is_ok());
+        let p = plan(&j, &src_two(4)).unwrap();
+        let h = p.sheets[0].height;
+        assert!(p.sheets[0].surfaces[1].marks.texts[0].y < h / 2.0);
     }
 
     #[test]

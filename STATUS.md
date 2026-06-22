@@ -145,7 +145,7 @@ spikes/spike0-qpdf    feasibility gate + `gen-fixture` (authors CMYK/TrimBox fix
     tests (`…asymmetric_bleed_keeps_seam_on_centred_cut`, `inner_creeps_non_finite_falls_back_to_full`).
   - `manual-tests/testcard-steprepeat-creep.json` is the creep reference job (`fraction: 0.5` → 21).
 
-- **M2 work styles — Phases 1 + 2a (done, branch `m2-work-styles`, not yet merged).** Design in
+- **M2 work styles — Phases 1 + 2a + 2b (done, branch `m2-work-styles`, not yet merged).** Design in
   `docs/m2-design.md` (revised after a 5-lens adversarial workflow review: 16 confirmed findings
   folded in — re-scoped phases, decided the back-source model, scoped the marks claim, fixed the test
   oracles). `WorkStyle` now drives a **duplex back surface** on N-up + Step & Repeat (was inert; both
@@ -155,10 +155,13 @@ spikes/spike0-qpdf    feasibility gate + `gen-fixture` (authors CMYK/TrimBox fix
     horizontal centreline), **Perfector** (180° about the sheet centre + content rotated 180°). All
     verified end-to-end through the CLI (`manual-tests/m2-work-styles/`, gs-rendered PNGs).
     `work_style` stays **inert unless a `back` is configured** (back-compat).
-  - **One known guard (Phase 2b lifts it):** sheet-edge **furniture** (slug/colour-bar/barcode) is
-    pinned to the front gripper edge and doesn't relocate when the work style moves the gripper, so
-    furniture on Tumble/Perfector is rejected (`EngineError::FurnitureOnMovedGripper`). Cell-derived
-    marks (crop/centre/trim/registration) reflect with the cells and are fine on every style.
+  - **Furniture relocates with the gripper (2b):** `SurfaceMarkInput.gripper_edge` (`Bottom`/`Top`);
+    `attach_marks` sets the back of a gang/N-up tumble/perfector job to `Top`, and
+    `reflect_furniture_to_top` mirrors slug/colour-bar/barcode about the sheet centre (glyphs upright)
+    so they park just inside the moved gripper, never in the bite. Cell-derived marks (crop/centre/
+    trim/registration) reflect with the cells. The 2a `FurnitureOnMovedGripper` guard is **gone** — all
+    four styles take any mark set. (A *user-configurable* sheet gripper edge + Left/Right + `grid_cell_rect`
+    generalisation is future; work styles only move bottom↔top.)
   - **Data model:** `StepRepeat.back` / `NUp.back: Option<BackSpec>` (`BackSpec { source }` = a second
     declared source, 1:1 by fill order). **v1 requires equal trim+bleed geometry** (else
     `BackGeometryMismatch`) and equal page count (`BackCountMismatch`) — so the front-derived
@@ -170,14 +173,14 @@ spikes/spike0-qpdf    feasibility gate + `gen-fixture` (authors CMYK/TrimBox fix
     spine-safe-clip generalised → inner creep carries over for free). Cell-derived marks follow the
     reflected cells automatically.
   - **Tests (pure, no qpdf):** per-style position reflection (turn/tumble/perfector) + involution,
-    perfector content-180° (`a<0`) + det>0 across all styles, sheetwise same-positions,
-    furniture-on-moved-gripper rejected, work-style-inert-without-back, count/geometry mismatch
-    rejections, `/Rotate`-on-back, `reflect_x`/`reflect_y` involution. **All green: 77 engine + 10
-    integration + 11 types; clippy `--all-features` + fmt clean.**
-  - **NEXT — M2 Phase 2b:** `GripperEdge` enum; thread each surface's effective gripper edge through
-    `attach_marks` → `region_origin`/`slug_text` so furniture relocates for tumble/perfector; lift the
-    2a furniture guard; pulls in the warnings/error channel. Then **2c:** backend QI byte/CTM parity +
-    reference jobs with real distinct front/back art. **Phase 3:** booklet `work_style` metadata.
+    perfector content-180° (`a<0`) + det>0 across all styles, sheetwise same-positions, moved-gripper
+    back furniture relocates to the top (turn/sheetwise stays bottom), work-style-inert-without-back,
+    count/geometry mismatch rejections, `/Rotate`-on-back, `reflect_x`/`reflect_y` involution. **All
+    green: 77 engine + 10 integration + 11 types; clippy `--all-features` + fmt clean.** All four styles
+    (incl. tumble+slug furniture relocation) verified end-to-end through the CLI.
+  - **NEXT — M2 Phase 2c:** backend QI byte/CTM parity for the two-surface gang/N-up; `manual-tests`
+    reference jobs with real distinct front/back art. **Phase 3:** make `work_style` meaningful on the
+    booklet paths (mostly metadata). Then merge `m2-work-styles` → `main`.
 - **Still on the backlog (smaller / infra):** (a) **strict BleedBox-or-trim toggle** (the M1.6 still-
   TODO: a job flag to disable natural-bleed inference so only an explicit BleedBox counts); (b) the
   **warnings channel** (GWG equal-TrimBox flags; also wanted by M2 Phase 3); (c) other deferred

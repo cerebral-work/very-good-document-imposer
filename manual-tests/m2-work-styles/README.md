@@ -2,8 +2,9 @@
 
 Eyeball the duplex back surface that `WorkStyle` drives on N-up / Step & Repeat. All four styles are
 wired: `sheetwise`, `work-and-turn`, `work-and-tumble`, `perfector`. Cell-derived marks (crop, etc.)
-reflect with the cells on every style; **sheet-edge furniture** (slug / colour bar / barcode) on a
-gripper-moving style (tumble / perfector) is still rejected until the gripper-edge model lands.
+reflect with the cells; **sheet-edge furniture** (slug / colour bar / barcode) relocates to the
+surface's gripper edge — for tumble / perfector the back's gripper moves to the tail, so its furniture
+parks at the top instead of the bottom.
 
 ## Run
 
@@ -28,11 +29,13 @@ Every job's page 1 is the front (2×2 grid, row-major, light → dark); page 2 i
   cells upright.
 - **`nup-perfector`** — back is the front **rotated 180°** about the sheet centre: positions reflect on
   *both* axes and each cell's content is turned 180° (upside-down), unlike turn/tumble.
+- **`nup-tumble-slug`** — tumble **with a slug**: page 1 (front) prints the slug at the bottom-left;
+  page 2 (back) relocates it to the **top** edge (the gripper moved to the tail), glyphs upright.
 - **`gang-work-and-turn`** — a Step & Repeat card gang (2×3, bleed-to-bleed) with a back. Two surfaces,
   back gang reflected. With these identical fixtures the cells are uniform so the mirror isn't visually
   obvious — swap in your own distinct front/back card art (below) to see it.
-- **`nup-tumble-slug`** — expected to **fail**: tumble + a slug → `sheet-edge furniture … needs the
-  gripper-edge model …`. Cell marks (crop) are fine on tumble/perfector; furniture isn't yet.
+- **`nup-bad-back`** — expected to **fail**: the back references an undeclared source →
+  `source 'does-not-exist' not found …`. (Count/geometry mismatches are rejected the same way.)
 
 ## Use your own art
 
