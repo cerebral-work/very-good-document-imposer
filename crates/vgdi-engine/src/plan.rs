@@ -401,23 +401,24 @@ fn plan_nup(job: &JobSpec, sources: &[SourceInfo], n: &NUp) -> Result<Imposition
             check_bleed_gutter(&p.ctm, trim, bleed, n.gutter_pt)?;
         }
 
-        // Paired back cell: place the back page into the work-style-reflected cell — upright for
-        // turn/tumble, rotated 180° for perfector (never mirrored). Equal geometry (validated) ⇒ the
-        // bleed gutter already checked on the front holds for the back.
+        // Paired back cell (N-up anchors on the trim, like the front). Equal geometry (validated in
+        // back_cell) ⇒ the bleed gutter already checked on the front holds for the back.
         if let Some(bsrc) = back_src {
-            let (bt, bb, brot, bcs) = validate_page(bsrc, page)?;
-            require_back_geometry(&bsrc.id, page, trim, bleed, bt, bb)?;
-            let bcell = work_style_reflect(cell, ws, sw, sh);
-            let bp = place_best(
-                bt,
-                brot,
-                bcell,
+            back.push(back_cell(
+                bsrc,
+                page,
+                trim,
+                bleed,
+                &p.ctm,
+                clip,
+                cell,
+                false,
                 n.scale,
                 n.rotate_to_fit,
-                work_style_content_flip(ws),
-            );
-            let bclip = back_clip(&p.ctm, clip, &bp.ctm, ws, sw, sh);
-            back.push(make_cell(&bsrc.id, page, bp.ctm, bclip, bt, bb, bcs));
+                ws,
+                sw,
+                sh,
+            )?);
         }
 
         front.push(make_cell(&src.id, page, p.ctm, clip, trim, bleed, cs));
@@ -491,8 +492,21 @@ fn same_size(a: Rect, b: Rect) -> bool {
     (a.width() - b.width()).abs() < TOL && (a.height() - b.height()).abs() < TOL
 }
 
-/// v1 requires each back page's trim **and** bleed to match its paired front page's size, so the cut
-/// registers and the front-derived placement/clip carries to the back unchanged. Reject otherwise.
+/// The four per-edge insets of the trim box within the bleed box (left, bottom, right, top).
+fn trim_insets(trim: Rect, bleed: Rect) -> [f64; 4] {
+    [
+        trim.llx - bleed.llx,
+        trim.lly - bleed.lly,
+        bleed.urx - trim.urx,
+        bleed.ury - trim.ury,
+    ]
+}
+
+/// v1 requires each back page to be **geometrically congruent** to its paired front page: equal trim
+/// size *and* the same trim-within-bleed insets (which also pins the bleed size). Equal size alone is
+/// not enough — when the back is anchored on its bleed box (step-&-repeat `Bleed`), a differently
+/// offset trim would land off the front's cut even with matching sizes. Reject otherwise, so the cut
+/// registers and the front-derived placement/clip carries to the back unchanged.
 fn require_back_geometry(
     back_id: &str,
     page: usize,
@@ -501,7 +515,12 @@ fn require_back_geometry(
     back_trim: Rect,
     back_bleed: Rect,
 ) -> Result<()> {
-    if same_size(front_trim, back_trim) && same_size(front_bleed, back_bleed) {
+    const TOL: f64 = 1e-6;
+    let insets_match = trim_insets(front_trim, front_bleed)
+        .iter()
+        .zip(trim_insets(back_trim, back_bleed))
+        .all(|(f, b)| (f - b).abs() < TOL);
+    if same_size(front_trim, back_trim) && insets_match {
         Ok(())
     } else {
         Err(EngineError::BackGeometryMismatch {
@@ -526,6 +545,43 @@ fn back_clip(
     let sheet = transform_rect_bounds(front_ctm, front_clip);
     let reflected = work_style_reflect(sheet, ws, sheet_w, sheet_h);
     transform_rect_bounds(&back_ctm.inverse(), reflected)
+}
+
+/// Build the back-surface cell paired with a front cell — shared by N-up and step-&-repeat. Validates
+/// the back page, requires equal trim/bleed geometry, then places the back box (its trim, or its bleed
+/// box when `place_bleed_box`) **upright** — 180° for perfector — into the work-style-reflected cell,
+/// with the front clip reflected through `T` into back page space. The placement mirrors how the front
+/// was placed, so equal geometry ⇒ the back registers and the front-derived clip/creep carries over.
+#[allow(clippy::too_many_arguments)]
+fn back_cell(
+    back_src: &SourceInfo,
+    page: usize,
+    front_trim: Rect,
+    front_bleed: Rect,
+    front_ctm: &Matrix,
+    front_clip: Rect,
+    cell: Rect,
+    place_bleed_box: bool,
+    scale: ScaleMode,
+    rotate_to_fit: bool,
+    ws: WorkStyle,
+    sheet_w: f64,
+    sheet_h: f64,
+) -> Result<Cell> {
+    let (bt, bb, brot, bcs) = validate_page(back_src, page)?;
+    require_back_geometry(&back_src.id, page, front_trim, front_bleed, bt, bb)?;
+    let anchor = if place_bleed_box { bb } else { bt };
+    let bcell = work_style_reflect(cell, ws, sheet_w, sheet_h);
+    let bp = place_best(
+        anchor,
+        brot,
+        bcell,
+        scale,
+        rotate_to_fit,
+        work_style_content_flip(ws),
+    );
+    let bclip = back_clip(front_ctm, front_clip, &bp.ctm, ws, sheet_w, sheet_h);
+    Ok(make_cell(&back_src.id, page, bp.ctm, bclip, bt, bb, bcs))
 }
 
 /// Emit a sheet with a front surface and, when `back` is non-empty, a reflected back surface.
@@ -755,20 +811,6 @@ fn plan_step_repeat(
         let ox = margin + (usable_w - block_w) / 2.0;
         let oy = gripper + margin + (usable_h - block_h) / 2.0;
 
-        // Resolve the paired back page once per gang (equal geometry ⇒ identical card box & tiling).
-        let back_page = match back_src {
-            Some(bsrc) => {
-                let (bt, bb, brot, bcs) = validate_page(bsrc, page)?;
-                require_back_geometry(&bsrc.id, page, trim, bleed, bt, bb)?;
-                let bcard = match sr.bleed_mode {
-                    BleedMode::Bleed => bb,
-                    BleedMode::NoBleed => bt,
-                };
-                Some((bsrc, bt, bb, brot, bcs, bcard))
-            }
-            None => None,
-        };
-
         let creeping = creep.any();
         let mut cells = Vec::new();
         let mut back_cells = Vec::new();
@@ -786,20 +828,24 @@ fn plan_step_repeat(
                 } else {
                     card
                 };
-                // Paired back card: place into the reflected cell (upright for turn/tumble, 180° for
-                // perfector); the clip (incl. creep) follows the front through `T` into back page space.
-                if let Some((bsrc, bt, bb, brot, bcs, bcard)) = back_page {
-                    let bcell = work_style_reflect(cell, ws, sw, sh);
-                    let bp = place_best(
-                        bcard,
-                        brot,
-                        bcell,
+                // Paired back card (step-&-repeat anchors on the card box, like the front); the clip
+                // (incl. creep) follows the front through `T` into back page space.
+                if let Some(bsrc) = back_src {
+                    back_cells.push(back_cell(
+                        bsrc,
+                        page,
+                        trim,
+                        bleed,
+                        &p.ctm,
+                        clip,
+                        cell,
+                        matches!(sr.bleed_mode, BleedMode::Bleed),
                         sr.scale,
                         false,
-                        work_style_content_flip(ws),
-                    );
-                    let bclip = back_clip(&p.ctm, clip, &bp.ctm, ws, sw, sh);
-                    back_cells.push(make_cell(&bsrc.id, page, bp.ctm, bclip, bt, bb, bcs));
+                        ws,
+                        sw,
+                        sh,
+                    )?);
                 }
                 cells.push(make_cell(&src.id, page, p.ctm, clip, trim, bleed, cs));
             }
@@ -1768,9 +1814,11 @@ mod tests {
         // Slug defaults to BottomLeft. On a gripper-moving back (tumble/perfector) the gripper is at
         // the tail, so the back's slug relocates to the top edge; on the front (and turn/sheetwise
         // backs, gripper unchanged) it stays at the bottom. Glyphs stay upright either way.
+        const GRIP: f64 = 40.0;
         for ws in [WorkStyle::WorkAndTumble, WorkStyle::Perfector] {
             let mut j = job(nup_back(2, 2, BleedMode::NoBleed));
             j.sheet.work_style = ws;
+            j.sheet.gripper_pt = GRIP;
             j.marks.slug = Some(Slug::default());
             let p = plan(&j, &src_two(4)).unwrap();
             let h = p.sheets[0].height;
@@ -1787,6 +1835,11 @@ mod tests {
             assert!(
                 back[0].y > h / 2.0,
                 "{ws:?} back slug relocates to the moved gripper edge"
+            );
+            // ...and parks *just inside* the moved (top) gripper band — never in the gripper bite.
+            assert!(
+                back[0].y + back[0].size <= h - GRIP + 1e-6,
+                "{ws:?} back slug must clear the top gripper band, not sit in the bite"
             );
         }
 
@@ -1826,6 +1879,29 @@ mod tests {
         sources[1].pages[0] = geom(Some(Rect::new(10.0, 10.0, 150.0, 150.0)), 0);
         assert!(matches!(
             plan(&job(nup_back(1, 1, BleedMode::NoBleed)), &sources).unwrap_err(),
+            EngineError::BackGeometryMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn back_with_shifted_trim_within_bleed_is_rejected() {
+        // Same trim size (180×180) AND same bleed size (190×190) as the front, but the trim sits at a
+        // different offset inside the bleed (asymmetric). Anchored on the bleed box (step-&-repeat
+        // Bleed) this would land the cut off the front's, so it's rejected despite matching sizes.
+        let mut sources = src_two(1);
+        sources[1].pages[0] = PageGeometry {
+            boxes: PageBoxes {
+                media: Rect::new(0.0, 0.0, 200.0, 200.0),
+                crop: None,
+                trim: Some(Rect::new(10.0, 10.0, 190.0, 190.0)),
+                art: None,
+                bleed: Some(Rect::new(0.0, 5.0, 190.0, 195.0)), // 190×190, shifted left (insets differ)
+            },
+            rotate: 0,
+            group_cs: GroupCs::DeviceCmyk,
+        };
+        assert!(matches!(
+            plan(&job(step_repeat_back(BleedMode::Bleed)), &sources).unwrap_err(),
             EngineError::BackGeometryMismatch { .. }
         ));
     }

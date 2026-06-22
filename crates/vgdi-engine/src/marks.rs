@@ -314,15 +314,15 @@ pub fn plan_surface_marks(input: &SurfaceMarkInput) -> MarkPlan {
 /// the canonical gripper-at-bottom frame is mirrored to sit just inside the top edge instead. Only
 /// furniture primitives (filled rects) and slug text are passed in — cell-derived marks are not.
 fn reflect_furniture_to_top(prims: &mut [MarkPrimitive], texts: &mut [MarkText], sheet: Rect) {
-    let flip = sheet.lly + sheet.ury; // reflect about y = (lly+ury)/2: y ↦ flip − y
+    let axis = (sheet.lly + sheet.ury) / 2.0; // sheet horizontal centreline
     for p in prims.iter_mut() {
         if let MarkPrimitive::FillRect { rect, .. } = p {
-            *rect = Rect::new(rect.llx, flip - rect.ury, rect.urx, flip - rect.lly);
+            *rect = crate::geom::reflect_y(*rect, axis);
         }
     }
     for t in texts.iter_mut() {
-        // Mirror the text block [y, y+size] but keep glyphs upright → new origin = flip − y − size.
-        t.y = flip - t.y - t.size;
+        // Mirror the text block [y, y+size] but keep glyphs upright → new origin = 2·axis − y − size.
+        t.y = 2.0 * axis - t.y - t.size;
     }
 }
 
