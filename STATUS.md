@@ -178,9 +178,14 @@ spikes/spike0-qpdf    feasibility gate + `gen-fixture` (authors CMYK/TrimBox fix
     count/geometry mismatch rejections, `/Rotate`-on-back, `reflect_x`/`reflect_y` involution. **All
     green: 77 engine + 10 integration + 11 types; clippy `--all-features` + fmt clean.** All four styles
     (incl. tumble+slug furniture relocation) verified end-to-end through the CLI.
-  - **NEXT — M2 Phase 2c:** backend QI byte/CTM parity for the two-surface gang/N-up; `manual-tests`
-    reference jobs with real distinct front/back art. **Phase 3:** make `work_style` meaningful on the
-    booklet paths (mostly metadata). Then merge `m2-work-styles` → `main`.
+  - **Phase 2c (partial):** backend integration coverage added
+    (`imposition_qpdf.rs::duplex_nup_renders_front_and_back_surfaces_deterministically` — two
+    surfaces, byte-deterministic, back content ≠ front). **77 engine + 11 integration + 11 types.**
+    *Remaining (owner-side):* literal byte/CTM parity vs a Quite Imposing reference export (needs the
+    QI files); `manual-tests` jobs with real distinct front/back art (current fixtures are identical).
+  - **NEXT:** **Phase 3** — make `work_style` meaningful on the booklet paths (mostly metadata, since a
+    symmetric 2-up turn ≡ sheetwise plate). Then merge `m2-work-styles` → `main` (CI runs the 3-OS
+    matrix + cargo-deny + fmt/clippy).
 - **Still on the backlog (smaller / infra):** (a) **strict BleedBox-or-trim toggle** (the M1.6 still-
   TODO: a job flag to disable natural-bleed inference so only an explicit BleedBox counts); (b) the
   **warnings channel** (GWG equal-TrimBox flags; also wanted by M2 Phase 3); (c) other deferred

@@ -12,7 +12,7 @@ use qpdf::{
 };
 use std::path::{Path, PathBuf};
 use vgdi_types::{
-    Barcode, BleedMode, ColorPolicy, CropMarks, Duplex, FillOrder, JobSpec, MarkSet, NUp,
+    BackSpec, Barcode, BleedMode, ColorPolicy, CropMarks, Duplex, FillOrder, JobSpec, MarkSet, NUp,
     OutputTarget, RegistrationMarks, SaddleStitch, ScaleMode, Scheme, Sheet, Slug, SourceRef,
     StepRepeat, Symbology, WorkStyle, SCHEMA_ID,
 };
@@ -402,5 +402,70 @@ fn marks_output_is_byte_deterministic() {
         std::fs::read(&a).unwrap(),
         std::fs::read(&b).unwrap(),
         "imposed output with marks must stay byte-identical"
+    );
+}
+
+// ----------------------------------------------------------------- M2 work styles / duplex back
+
+/// A duplex N-up job: a second `back` source on the scheme, positioned per `work_style`.
+fn duplex_nup_job(front: &Path, back: &Path, ws: WorkStyle) -> JobSpec {
+    let mut job = job_with(
+        front,
+        Scheme::NUp(NUp {
+            rows: 2,
+            cols: 2,
+            fill: FillOrder::RowMajor,
+            scale: ScaleMode::Fit,
+            gutter_pt: 0.0,
+            rotate_to_fit: false,
+            bleed_mode: BleedMode::NoBleed,
+            back: Some(BackSpec {
+                source: "back".into(),
+            }),
+        }),
+    );
+    job.sources.push(SourceRef {
+        id: "back".into(),
+        path: back.to_path_buf(),
+    });
+    job.sheet.work_style = ws;
+    job
+}
+
+#[test]
+fn duplex_nup_renders_front_and_back_surfaces_deterministically() {
+    // Work-and-turn back surface: the engine loads the second source, plans a reflected back, and the
+    // backend emits one PDF page per surface — exercised end-to-end through read_source → plan → render.
+    let front = tmp("dup_front.pdf");
+    let back = tmp("dup_back.pdf");
+    write_source_boxed(&front, 4, true, true);
+    write_source_boxed(&back, 4, true, true);
+    let job = duplex_nup_job(&front, &back, WorkStyle::WorkAndTurn);
+
+    let out1 = tmp("dup_out1.pdf");
+    let out2 = tmp("dup_out2.pdf");
+    vgdi_engine::impose_to_file(&job, &out1).unwrap();
+    vgdi_engine::impose_to_file(&job, &out2).unwrap();
+    assert_eq!(
+        std::fs::read(&out1).unwrap(),
+        std::fs::read(&out2).unwrap(),
+        "duplex output must be byte-deterministic"
+    );
+
+    let doc = QPdf::read(&out1).unwrap();
+    assert_eq!(
+        doc.get_num_pages().unwrap(),
+        2,
+        "one sheet → two surfaces (front + back)"
+    );
+    let front_pg = doc.get_page(0).unwrap();
+    let back_pg = doc.get_page(1).unwrap();
+    assert!(page_resources(&front_pg).get("/XObject").is_some());
+    assert!(page_resources(&back_pg).get("/XObject").is_some());
+    // The back is a reflected placement, so its content stream (the cells' CTMs) differs from the front.
+    assert_ne!(
+        content_of(&front_pg),
+        content_of(&back_pg),
+        "back surface must be the reflected placement, not a copy of the front"
     );
 }

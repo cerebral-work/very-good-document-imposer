@@ -180,8 +180,13 @@ representability), so they move out of Phase 1.
   2a `FurnitureOnMovedGripper` guard is **lifted** — all four styles take any mark set. (A
   *user-configurable* sheet gripper edge + `grid_cell_rect` generalisation to Left/Right is future, not
   needed by work styles, which only move bottom↔top.)
-- **Phase 2c — backend QI parity + reference jobs.** Two-surface byte/CTM parity vs Quite Imposing;
-  `manual-tests` reference jobs with real distinct front/back art.
+- **Phase 2c (partial) — backend coverage + QI parity.** *Done:* an integration test
+  (`imposition_qpdf.rs::duplex_nup_renders_front_and_back_surfaces_deterministically`) drives a duplex
+  N-up through `read_source → plan → render`, asserting two surfaces/pages, byte-determinism, XObject
+  placement, and that the back content stream differs from the front (reflected). *Owner-side / future:*
+  literal byte/CTM parity vs a **Quite Imposing** reference export (needs the QI files), and
+  `manual-tests` jobs with real distinct front/back art (the current fixtures are identical, so the
+  gang mirror isn't visually distinct).
 - **Phase 3 — booklet work_style metadata + leftovers.** Make `work_style` meaningful on the booklet
   paths (mostly metadata, since a symmetric 2-up turn ≡ sheetwise plate); any deferred furniture/colour.
 
